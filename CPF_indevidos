@@ -1,0 +1,44 @@
+import os
+import re
+from pyad import *
+
+# Configurar conexão com o Active Directory
+pyad.set_defaults(ldap_server='seu_servidor_LDAP', username='seu_usuario', password='sua_senha')
+
+# Função para verificar se uma string contém um CPF válido
+def is_cpf(cpf):
+    pattern = re.compile(r'^\d{3}\.\d{3}\.\d{3}-\d{2}$')
+    return bool(pattern.match(cpf))
+
+# Função para varrer um diretório em busca de arquivos com CPFs
+def search_files(directory):
+    total_cpf_count = 0
+    file_cpf_count = 0
+
+    for root, dirs, files in os.walk(directory):
+        for file in files:
+            file_path = os.path.join(root, file)
+            if os.path.isfile(file_path):
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    cpf_list = re.findall(r'\d{3}\.\d{3}\.\d{3}-\d{2}', content)
+                    cpf_count = len(cpf_list)
+
+                    if cpf_count > 0:
+                        total_cpf_count += cpf_count
+                        file_cpf_count += 1
+                        print(f'Arquivo: {file_path} - Quantidade de CPFs: {cpf_count}')
+                        print('CPFs encontrados:')
+                        for cpf in cpf_list:
+                            print(cpf)
+                        print()
+
+    print('--- Resultado ---')
+    print(f'Total de CPFs encontrados: {total_cpf_count}')
+    print(f'Quantidade de arquivos com CPFs: {file_cpf_count}')
+
+# Diretório a ser varrido
+directory_to_search = r'C:\caminho\do\diretorio'
+
+# Executar a varredura
+search_files(directory_to_search)
