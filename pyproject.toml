@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cpf-lgpd"
+version = "2.0.0"
+description = "Descoberta e classificacao local de indicadores de dados pessoais"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-only"
+authors = [{name = "CPF LGPD contributors"}]
+dependencies = [
+  "Pillow>=10,<13",
+  "pypdf>=5,<7",
+  "pytesseract>=0.3.13,<0.4",
+  "xlrd>=2,<3",
+]
+
+[project.optional-dependencies]
+dev = ["coverage>=7.6,<8", "ruff>=0.9,<1"]
+
+[project.scripts]
+cpf-lgpd = "cpf_lgpd.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["cpf_lgpd*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+
+[tool.coverage.run]
+branch = true
+source = ["cpf_lgpd"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
