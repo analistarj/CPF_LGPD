@@ -14,13 +14,13 @@ from pathlib import Path
 from .classification import (
     AnalysisConfig,
     ContextAnalyzer,
-    is_valid_cpf as is_valid_cpf,
     redact_cpfs,
 )
+from .classification import is_valid_cpf as is_valid_cpf
 from .extractors import (
+    SUPPORTED_EXTENSIONS,
     ExtractionError,
     ExtractionLimits,
-    SUPPORTED_EXTENSIONS,
     iter_units_path,
 )
 from .permissions import LocalPermissionAdapter, PermissionAdapter, PermissionAssessment
