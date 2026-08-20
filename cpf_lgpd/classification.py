@@ -223,11 +223,15 @@ class ContextAnalyzer:
         for rule in SENSITIVE_RULES:
             if _negative_matches(rule, normalized_unit):
                 continue
-            for field in unit.fields:
-                normalized_value = normalize_text(field.text)
-                view = normalize_text(f"{field.header}: {field.text}") if field.header else normalized_value
+            for unit_field in unit.fields:
+                normalized_value = normalize_text(unit_field.text)
+                view = (
+                    normalize_text(f"{unit_field.header}: {unit_field.text}")
+                    if unit_field.header
+                    else normalized_value
+                )
                 match_count = _rule_match_count(rule, view)
-                header_match = _header_matches(rule, field.header, field.text)
+                header_match = _header_matches(rule, unit_field.header, unit_field.text)
                 if not match_count and not header_match:
                     continue
                 evidence_points = 40 if header_match or re.search(r"[:=]\s*\S+", view) else 35
@@ -245,7 +249,7 @@ class ContextAnalyzer:
                 level = confidence_level(score)
                 points = rule.risk_points[level]
                 occurrence = SensitiveOccurrence(
-                    location=dict(field.location),
+                    location=dict(unit_field.location),
                     rule_id=rule.rule_id,
                     legal_category=rule.legal_category,
                     legal_basis=rule.legal_basis,

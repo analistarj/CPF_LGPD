@@ -17,7 +17,12 @@ from .classification import (
     is_valid_cpf as is_valid_cpf,
     redact_cpfs,
 )
-from .extractors import SUPPORTED_EXTENSIONS, ExtractionError, ExtractionLimits, iter_units_path
+from .extractors import (
+    ExtractionError,
+    ExtractionLimits,
+    SUPPORTED_EXTENSIONS,
+    iter_units_path,
+)
 from .permissions import LocalPermissionAdapter, PermissionAdapter, PermissionAssessment
 from .risk import SCORE_VERSION, GovernanceMetadata, RiskAssessment, ScoreWeights, assess_risk
 from .rules import RULESET_VERSION, ruleset_metadata
