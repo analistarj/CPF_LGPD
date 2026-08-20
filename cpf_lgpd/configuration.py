@@ -17,6 +17,11 @@ class ToolConfig:
     max_age_days: int | None = None
     max_processing_seconds: int | None = None
     extensions: tuple[str, ...] = ()
+    permission_mode: str = "strict"
+    include_share_acl: bool = True
+    report_protection_mode: str = "strict"
+    require_absolute_root: bool = True
+    allow_reports_inside_root: bool = False
     weights: ScoreWeights = ScoreWeights()
     governance: GovernanceMetadata = GovernanceMetadata()
 
@@ -41,9 +46,21 @@ def load_config(path: Path | None) -> ToolConfig:
     if values.get("max_age_days") is not None:
         governance_values.setdefault("max_age_days", values["max_age_days"])
     extensions = tuple(values.pop("extensions", ()))
-    return ToolConfig(
+    config = ToolConfig(
         **values,
         extensions=extensions,
         weights=weights,
         governance=GovernanceMetadata(**governance_values),
     )
+    if config.permission_mode not in {"strict", "best-effort"}:
+        raise ValueError("permission_mode deve ser strict ou best-effort")
+    if config.report_protection_mode not in {"strict", "best-effort"}:
+        raise ValueError("report_protection_mode deve ser strict ou best-effort")
+    for name in (
+        "include_share_acl",
+        "require_absolute_root",
+        "allow_reports_inside_root",
+    ):
+        if not isinstance(getattr(config, name), bool):
+            raise ValueError(f"{name} deve ser booleano")
+    return config

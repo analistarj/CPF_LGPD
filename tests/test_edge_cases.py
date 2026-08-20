@@ -26,7 +26,7 @@ from cpf_lgpd.extractors import (
     iter_units_bytes,
     iter_units_path,
 )
-from cpf_lgpd.permissions import LocalPermissionAdapter
+from cpf_lgpd.permissions import LocalPermissionAdapter, WindowsAclDependencyError
 from cpf_lgpd.scanner import DEFAULT_EXTENSIONS, ScanResult, _sanitize_structure, scan_directory
 
 CPF = "52998224725"
@@ -86,6 +86,7 @@ class CliAndConfigurationEdgeTests(unittest.TestCase):
                             str(paths["executive"]),
                             "--executive-csv-report",
                             str(paths["executive_csv"]),
+                            "--allow-report-inside-root",
                         ]
                     )
             self.assertEqual(exit_code, 1)
@@ -178,10 +179,13 @@ class PermissionAdapterEdgeTests(unittest.TestCase):
 
     def test_windows_adapter_is_conservative(self):
         path = Path("C:/sintetico.txt")
-        with mock.patch("cpf_lgpd.permissions.os.name", "nt"):
+        with mock.patch("cpf_lgpd.permissions.os.name", "nt"), mock.patch(
+            "cpf_lgpd.permissions.PyWin32SecurityBackend",
+            side_effect=WindowsAclDependencyError("sintetico"),
+        ):
             result = LocalPermissionAdapter().assess(path)
         self.assertTrue(result.unknown)
-        self.assertEqual(result.source, "windows_acl_adapter_not_configured")
+        self.assertEqual(result.source, "windows_acl_dependency_missing")
 
 
 class ExtractorEdgeTests(unittest.TestCase):

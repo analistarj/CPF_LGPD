@@ -9,6 +9,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from .permissions import protect_report_path
 from .scanner import ScanResult
 
 
@@ -18,16 +19,28 @@ def _csv_safe(value: object) -> object:
     return f"'{value}" if value.lstrip().startswith(("=", "+", "-", "@")) else value
 
 
-def _atomic_write(path: Path, writer: Callable[[object], None], *, newline: str | None = None) -> None:
-    target = path.expanduser().resolve()
+def _atomic_write(
+    path: Path,
+    writer: Callable[[object], None],
+    *,
+    newline: str | None = None,
+    protection_mode: str = "strict",
+) -> None:
+    if protection_mode not in {"strict", "best-effort"}:
+        raise ValueError("protection_mode deve ser strict ou best-effort")
+    requested = path.expanduser().absolute()
+    if requested.is_symlink():
+        raise OSError("destino do relatorio nao pode ser link simbolico")
+    target = requested.resolve(strict=False)
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
     try:
-        os.chmod(temporary_name, 0o600)
+        protect_report_path(Path(temporary_name), strict=protection_mode == "strict")
         with os.fdopen(descriptor, "w", encoding="utf-8", newline=newline) as stream:
             writer(stream)
+        # O temporario fica no mesmo diretorio, portanto os.replace preserva
+        # o descritor de seguranca ou o modo ja aplicado ao proprio arquivo.
         os.replace(temporary_name, target)
-        os.chmod(target, 0o600)
     except BaseException:
         try:
             os.close(descriptor)
@@ -37,22 +50,28 @@ def _atomic_write(path: Path, writer: Callable[[object], None], *, newline: str 
         raise
 
 
-def _write_json(path: Path, result: ScanResult, report_level: str) -> None:
+def _write_json(
+    path: Path, result: ScanResult, report_level: str, protection_mode: str = "strict"
+) -> None:
     def writer(stream: object) -> None:
         json.dump(result.to_dict(report_level), stream, ensure_ascii=False, indent=2)  # type: ignore[arg-type]
         stream.write("\n")  # type: ignore[attr-defined]
 
-    _atomic_write(path, writer)
+    _atomic_write(path, writer, protection_mode=protection_mode)
 
 
-def write_json_report(path: Path, result: ScanResult) -> None:
+def write_json_report(
+    path: Path, result: ScanResult, *, protection_mode: str = "strict"
+) -> None:
     """Grava o relatorio tecnico protegido, incluindo caminhos completos."""
-    _write_json(path, result, "technical")
+    _write_json(path, result, "technical", protection_mode)
 
 
-def write_executive_json_report(path: Path, result: ScanResult) -> None:
+def write_executive_json_report(
+    path: Path, result: ScanResult, *, protection_mode: str = "strict"
+) -> None:
     """Grava o relatorio executivo protegido, somente com raiz logica e relativo."""
-    _write_json(path, result, "executive")
+    _write_json(path, result, "executive", protection_mode)
 
 
 _CSV_COLUMNS = [
@@ -88,6 +107,11 @@ _CSV_COLUMNS = [
     "last_modified_at",
     "technical_owner",
     "permissions_source",
+    "permission_level",
+    "permissions_assessed",
+    "acl_inheritance",
+    "share_acl_evaluated",
+    "path_kind",
     "created_by",
     "last_modified_by",
 ]
@@ -140,28 +164,39 @@ def _csv_rows(result: ScanResult, report_level: str):
                 "size_bytes": trace["size_bytes"],
                 "created_at": trace["created_at"],
                 "last_modified_at": trace["last_modified_at"],
-                "technical_owner": trace["technical_owner"],
-                "permissions_source": trace["permissions_source"],
+                "technical_owner": trace.get("technical_owner", ""),
+                "permissions_source": trace.get("permissions_source", ""),
+                "permission_level": trace.get("permission_level", ""),
+                "permissions_assessed": trace.get("permissions_assessed", ""),
+                "acl_inheritance": trace.get("acl_inheritance", ""),
+                "share_acl_evaluated": trace.get("share_acl_evaluated", ""),
+                "path_kind": trace.get("path_kind", ""),
                 "created_by": trace["created_by"],
                 "last_modified_by": trace["last_modified_by"],
             }
             yield {name: _csv_safe(row[name]) for name in _CSV_COLUMNS}
 
 
-def _write_csv(path: Path, result: ScanResult, report_level: str) -> None:
+def _write_csv(
+    path: Path, result: ScanResult, report_level: str, protection_mode: str = "strict"
+) -> None:
     def writer(stream: object) -> None:
         output = csv.DictWriter(stream, fieldnames=_CSV_COLUMNS)  # type: ignore[arg-type]
         output.writeheader()
         output.writerows(_csv_rows(result, report_level))
 
-    _atomic_write(path, writer, newline="")
+    _atomic_write(path, writer, newline="", protection_mode=protection_mode)
 
 
-def write_csv_report(path: Path, result: ScanResult) -> None:
+def write_csv_report(
+    path: Path, result: ScanResult, *, protection_mode: str = "strict"
+) -> None:
     """Grava CSV tecnico protegido."""
-    _write_csv(path, result, "technical")
+    _write_csv(path, result, "technical", protection_mode)
 
 
-def write_executive_csv_report(path: Path, result: ScanResult) -> None:
+def write_executive_csv_report(
+    path: Path, result: ScanResult, *, protection_mode: str = "strict"
+) -> None:
     """Grava CSV executivo protegido sem caminhos completos."""
-    _write_csv(path, result, "executive")
+    _write_csv(path, result, "executive", protection_mode)

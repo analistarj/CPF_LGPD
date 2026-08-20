@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 
 from .configuration import load_config
+from .corporate import preflight_root
+from .path_security import validate_report_targets
+from .permissions import default_permission_adapter
 from .reporting import (
     write_csv_report,
     write_executive_csv_report,
@@ -15,6 +18,7 @@ from .reporting import (
     write_json_report,
 )
 from .scanner import DEFAULT_EXTENSIONS, scan_directory
+from .version import APPLICATION_VERSION
 
 
 def _positive_int(value: str) -> int:
@@ -29,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="cpf-lgpd",
         description="Localiza CPFs validos sem exibir ou armazenar os numeros encontrados.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APPLICATION_VERSION}")
     parser.add_argument("directory", type=Path, help="diretorio ou compartilhamento UNC autorizado")
     parser.add_argument("--report", type=Path, help="relatorio tecnico JSON protegido")
     parser.add_argument("--csv-report", type=Path, help="relatorio tecnico CSV protegido")
@@ -60,6 +65,33 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-processing-seconds", type=_positive_int, help="limite total aproximado da varredura"
     )
     parser.add_argument(
+        "--permission-mode",
+        choices=("strict", "best-effort"),
+        help="exigir adaptador ACL nativo no Windows ou aceitar exposicao desconhecida",
+    )
+    parser.add_argument(
+        "--share-acl",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="combinar DACL NTFS com ACL do compartilhamento SMB",
+    )
+    parser.add_argument(
+        "--report-protection-mode",
+        choices=("strict", "best-effort"),
+        help="falhar se a ACL restritiva do relatorio nao puder ser aplicada",
+    )
+    parser.add_argument(
+        "--allow-report-inside-root",
+        action="store_true",
+        default=None,
+        help="excecao explicita para gravar relatorio dentro da raiz examinada",
+    )
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="validar raiz, listagem e fonte de permissoes sem examinar arquivos",
+    )
+    parser.add_argument(
         "--hmac-secret-env",
         default="CPF_LGPD_HMAC_SECRET",
         help="nome da variavel de ambiente com segredo de deduplicacao",
@@ -81,6 +113,48 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         configured_extensions = args.extensions or list(config.extensions)
         secret_value = os.environ.get(args.hmac_secret_env)
+        permission_mode = args.permission_mode or config.permission_mode
+        report_protection_mode = (
+            args.report_protection_mode or config.report_protection_mode
+        )
+        include_share_acl = (
+            config.include_share_acl if args.share_acl is None else args.share_acl
+        )
+        allow_reports_inside = (
+            config.allow_reports_inside_root
+            if args.allow_report_inside_root is None
+            else args.allow_report_inside_root
+        )
+        report_targets = tuple(
+            path
+            for path in (
+                args.report,
+                args.csv_report,
+                args.executive_report,
+                args.executive_csv_report,
+            )
+            if path is not None
+        )
+        if report_targets:
+            validate_report_targets(
+                args.directory,
+                report_targets,
+                allow_inside_root=allow_reports_inside,
+            )
+        permission_adapter = default_permission_adapter(
+            include_share_acl=include_share_acl,
+            require_windows_acl=permission_mode == "strict",
+        )
+        preflight = preflight_root(
+            args.directory,
+            permission_adapter,
+            require_absolute_root=config.require_absolute_root,
+        )
+        if args.preflight_only:
+            print("Preflight aprovado.")
+            print(f"Tipo de raiz: {preflight.root_kind}")
+            print(f"Fonte de permissoes: {preflight.permissions.source}")
+            return 0
         result = scan_directory(
             args.directory,
             extensions=_normalize_extensions(configured_extensions),
@@ -93,15 +167,31 @@ def main(argv: list[str] | None = None) -> int:
             score_weights=config.weights,
             max_processing_seconds=args.max_processing_seconds or config.max_processing_seconds,
             root_id=args.root_id,
+            permission_adapter=permission_adapter,
+            include_share_acl=include_share_acl,
+            require_windows_acl=permission_mode == "strict",
+            require_absolute_root=config.require_absolute_root,
         )
         if args.report:
-            write_json_report(args.report, result)
+            write_json_report(
+                args.report, result, protection_mode=report_protection_mode
+            )
         if args.csv_report:
-            write_csv_report(args.csv_report, result)
+            write_csv_report(
+                args.csv_report, result, protection_mode=report_protection_mode
+            )
         if args.executive_report:
-            write_executive_json_report(args.executive_report, result)
+            write_executive_json_report(
+                args.executive_report,
+                result,
+                protection_mode=report_protection_mode,
+            )
         if args.executive_csv_report:
-            write_executive_csv_report(args.executive_csv_report, result)
+            write_executive_csv_report(
+                args.executive_csv_report,
+                result,
+                protection_mode=report_protection_mode,
+            )
     except (OSError, ValueError) as exception:
         print(f"Erro operacional: {type(exception).__name__}", file=sys.stderr)
         return 2
@@ -109,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Arquivos examinados: {result.files_scanned}")
     print(f"Arquivos ignorados: {result.files_skipped}")
     print(f"Arquivos com falha: {result.files_failed}")
-    print(f"Arquivos com CPF: {len(result.findings)}")
+    print(f"Arquivos com achados: {len(result.findings)}")
     print(f"Total de CPFs validos: {result.valid_cpfs}")
     if args.report:
         print("Relatorio protegido gravado com sucesso.")
@@ -119,7 +209,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Relatorio executivo protegido gravado com sucesso.")
     if args.executive_csv_report:
         print("Relatorio executivo CSV protegido gravado com sucesso.")
-    return 1 if result.valid_cpfs else 0
+    return 1 if result.findings else 0
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 import sqlite3
 import stat
 import tempfile
@@ -250,11 +251,13 @@ class ReportingTests(unittest.TestCase):
                 self.assertNotIn(CPF, content)
                 self.assertNotIn(SENSITIVE_VALUE, content)
                 self.assertNotIn(PERSON_NAME, content)
-                self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
+                if os.name != "nt":
+                    self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
 
             technical = json.loads(technical_json.read_text(encoding="utf-8"))
             executive = json.loads(executive_json.read_text(encoding="utf-8"))
             self.assertEqual(technical["report_level"], "technical")
+            self.assertEqual(technical["application_version"], "2.2.0rc1")
             self.assertEqual(technical["score_version"], "1.1")
             self.assertEqual(technical["ruleset_version"], "lgpd-br-1.0.0")
             self.assertIn("positive_indicators", technical["ruleset"][0])
@@ -262,6 +265,8 @@ class ReportingTests(unittest.TestCase):
             self.assertIn(str(root), technical["findings"][0]["canonical_path"])
             self.assertEqual(executive["report_level"], "executive")
             self.assertEqual(executive["findings"][0]["file_path"], "data.txt")
+            self.assertNotIn("technical_owner", executive["findings"][0])
+            self.assertNotIn("permissions_source", executive["findings"][0])
             self.assertNotIn(str(root), executive_json.read_text(encoding="utf-8"))
 
             with technical_csv.open(encoding="utf-8", newline="") as stream:
@@ -301,6 +306,7 @@ class ReportingTests(unittest.TestCase):
                         str(technical),
                         "--executive-report",
                         str(executive),
+                        "--allow-report-inside-root",
                     ]
                 )
             self.assertEqual(exit_code, 1)

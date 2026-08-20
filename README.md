@@ -4,6 +4,8 @@ Ferramenta local para localizar CPFs matematicamente válidos, registrar a local
 dos achados e classificar indicadores de dados pessoais sensíveis com regras determinísticas,
 explicáveis e versionadas.
 
+Versão candidata corporativa atual: `2.2.0rc1`, perfil `windows-corporate-1.0-rc1`.
+
 O número encontrado, o nome da pessoa, o valor sensível, a célula e o trecho do documento nunca
 são gravados nos relatórios ou logs. O resultado apoia inventário e revisão, mas não determina
 sozinho conformidade, licitude ou violação da LGPD.
@@ -13,16 +15,21 @@ sozinho conformidade, licitude ou violação da LGPD.
 - regras sensíveis: `lgpd-br-1.0.0`;
 - score de risco: `1.1`;
 - fundamento das regras: `LGPD_ART_5_II`.
+- política de caminhos: `windows-path-1.0`;
+- política de permissões: `windows-acl-1.0`.
 
 A taxonomia, fórmulas, indicadores, negativas e processo de revisão estão em
 [Regras de dados pessoais sensíveis](docs/SENSITIVE_DATA_RULES.md). A composição completa do risco
 está em [Metodologia](docs/METODOLOGIA.md).
+O roteiro de homologação Windows está em
+[Candidata corporativa Windows](docs/WINDOWS_CORPORATE_RC.md).
 
 ## Requisitos
 
 - Python 3.10 ou superior;
 - leitura autorizada somente nas raízes aprovadas;
 - autenticação prévia do sistema operacional para compartilhamentos UNC;
+- Windows 10/11 ou Windows Server suportado, com `pywin32`, instalado automaticamente no Windows;
 - Tesseract OCR para imagens;
 - `antiword` para Word binário `.doc`.
 
@@ -39,16 +46,30 @@ python -m pip install .
 
 No Windows, a ativação usual é `.venv\Scripts\activate`.
 
+Para a candidata corporativa no PowerShell:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install .
+cpf-lgpd '\\servidor\compartilhamento' --preflight-only --root-id area-autorizada
+```
+
 ## Uso
 
 ```bash
 cpf-lgpd /dados/autorizados --root-id area-controlada
 cpf-lgpd '\\servidor\compartilhamento' --root-id compartilhamento-rh
-cpf-lgpd /dados --report tecnico.json --executive-report executivo.json
+cpf-lgpd /dados --report /relatorios/tecnico.json --executive-report /relatorios/executivo.json
 cpf-lgpd /dados --csv-report tecnico.csv --executive-csv-report executivo.csv
 cpf-lgpd /dados --mode cpf-anchor --extension csv --extension xlsx
 cpf-lgpd /dados --config configuracao.json
+cpf-lgpd '\\servidor\compartilhamento' --permission-mode strict --share-acl --preflight-only
 ```
+
+O perfil padrão é estrito. A raiz deve ser absoluta ou UNC, a fonte de ACL nativa é obrigatória no
+Windows e os relatórios devem ficar fora da árvore examinada. `--allow-report-inside-root` é uma
+exceção explícita para compatibilidade, não uma configuração recomendada.
 
 `cpf-anchor` é o modo padrão. Uma classificação sensível só é confirmada quando um CPF válido,
 uma evidência explícita e um vínculo forte aparecem na mesma unidade verificável.
@@ -75,6 +96,12 @@ O inventário registra, para cada arquivo analisado:
 O scanner resolve os caminhos antes da leitura e impede saída da raiz por link simbólico, junction
 ou caminho relativo. Credenciais incorporadas em URL ou caminho são removidas dos metadados. O
 próprio caminho deve ser tratado como informação confidencial.
+
+No Windows, a candidata lê proprietário e DACL NTFS pela API de segurança do sistema. Para uma
+raiz UNC, também consulta a ACL do compartilhamento SMB e calcula o alcance efetivo usando a
+camada mais restritiva quando ambas são conhecidas. DACL com `deny`, ACE não suportada ou consulta
+parcial fica `unknown`, sem tentar adivinhar acesso efetivo. Somente categoria de exposição, fonte,
+estado de herança e resultado da avaliação são persistidos, nunca a lista de trustees.
 
 ## Localização por formato
 
@@ -126,9 +153,16 @@ confidence_score, confidence_level, risk_points, match_count, requires_human_rev
 ruleset_version, score_version
 ```
 
-Os arquivos são gravados atomicamente com permissão `0600`. Em Windows e armazenamentos remotos,
-o operador também deve configurar ACLs adequadas. Grave os relatórios fora da árvore examinada,
-restrinja o acesso, use criptografia em repouso e aplique retenção curta.
+O técnico também inclui `permission_level`, `permissions_assessed`, `acl_inheritance`,
+`share_acl_evaluated`, `permissions_source` e as versões das políticas operacionais.
+
+Os arquivos são gravados atomicamente. Em POSIX recebem modo `0600`. No Windows recebem DACL
+protegida para o operador atual, `SYSTEM` e `Administrators`. Se essa proteção falhar, o modo
+`strict` remove o temporário e encerra sem publicar o relatório. O diretório de destino também deve
+ser previamente controlado, com criptografia em repouso e retenção curta.
+
+O relatório executivo omite caminho completo, proprietário técnico e detalhes de ACL. Esses dados
+permanecem somente no relatório técnico protegido.
 
 HMAC é opcional para deduplicação sem persistir o CPF:
 
@@ -149,10 +183,18 @@ Sem segredo, nenhum identificador persistente é produzido.
   "max_processing_seconds": 3600,
   "max_age_days": 1825,
   "extensions": ["txt", "csv", "pdf", "docx", "xlsx"],
+  "permission_mode": "strict",
+  "include_share_acl": true,
+  "report_protection_mode": "strict",
+  "require_absolute_root": true,
+  "allow_reports_inside_root": false,
   "weights": {"cpf": 5, "content_cap": 40},
   "governance": {"purpose": "unknown", "legal_basis": "unknown"}
 }
 ```
+
+Um arquivo completo está em
+[examples/windows-corporate.json](examples/windows-corporate.json).
 
 ## Desenvolvimento
 
@@ -172,7 +214,13 @@ Use somente dados artificiais em testes, fixtures, commits e issues.
 - PDF digitalizado depende de OCR em fluxo separado ou de imagem suportada;
 - OCR e extração de PDF podem gerar falsos positivos ou negativos;
 - bancos não SQLite e formatos proprietários não são lidos;
-- ACL de Windows ainda exige adaptador específico e aparece como desconhecida;
+- unidade de rede mapeada não identifica com segurança o compartilhamento de origem, use UNC para
+  combinar ACL NTFS e SMB;
+- ACL com negação, ACE condicional ou tipo não suportado é marcada como desconhecida;
+- DFS, permissões dinâmicas, grupos aninhados e acesso efetivo por token não são expandidos nesta
+  candidata;
+- a conta de execução pode não ter `READ_CONTROL` ou permissão para consultar a ACL do share, nesse
+  caso a fonte parcial é registrada e a exposição permanece desconhecida;
 - ausência de achado não comprova ausência de dado pessoal;
 - a ferramenta não infere atributo sensível por nome, fotografia, endereço ou estatística;
 - nenhuma ação de exclusão, movimentação, criptografia ou quarentena é executada.

@@ -17,15 +17,29 @@ from .classification import (
     redact_cpfs,
 )
 from .classification import is_valid_cpf as is_valid_cpf
+from .corporate import CORPORATE_PROFILE_VERSION
 from .extractors import (
     SUPPORTED_EXTENSIONS,
     ExtractionError,
     ExtractionLimits,
     iter_units_path,
 )
-from .permissions import LocalPermissionAdapter, PermissionAdapter, PermissionAssessment
+from .path_security import (
+    PATH_POLICY_VERSION,
+    is_reparse_point,
+    is_within,
+    path_kind,
+    validate_root_syntax,
+)
+from .permissions import (
+    PERMISSION_POLICY_VERSION,
+    PermissionAdapter,
+    PermissionAssessment,
+    default_permission_adapter,
+)
 from .risk import SCORE_VERSION, GovernanceMetadata, RiskAssessment, ScoreWeights, assess_risk
 from .rules import RULESET_VERSION, ruleset_metadata
+from .version import APPLICATION_VERSION
 
 DEFAULT_EXTENSIONS = SUPPORTED_EXTENSIONS
 _URL_CREDENTIALS = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)([^/@\s]+)@")
@@ -34,6 +48,10 @@ _SECRET_QUERY = re.compile(r"(?i)([?&](?:token|password|passwd|secret|key|sig|cr
 
 class PathEscapeError(OSError):
     """Caminho canonico saiu da raiz autorizada."""
+
+
+class FileChangedDuringScanError(OSError):
+    """Arquivo ou redirecionamento mudou durante a leitura."""
 
 
 def sanitize_metadata(value: str) -> str:
@@ -71,6 +89,11 @@ class FileTrace:
     last_modified_at: str
     technical_owner: str
     permissions_source: str
+    permission_level: str = "unknown"
+    permissions_assessed: bool = False
+    acl_inheritance: str = "unknown"
+    share_acl_evaluated: bool = False
+    path_kind: str = "local"
     created_by: str = "unknown"
     last_modified_by: str = "unknown"
 
@@ -83,10 +106,9 @@ class FileTrace:
             "size_bytes": self.size_bytes,
             "created_at": self.created_at,
             "last_modified_at": self.last_modified_at,
-            "technical_owner": self.technical_owner,
-            "permissions_source": self.permissions_source,
             "created_by": self.created_by,
             "last_modified_by": self.last_modified_by,
+            "path_kind": self.path_kind,
         }
         if report_level == "technical":
             return {
@@ -94,6 +116,12 @@ class FileTrace:
                 "original_path": self.original_path,
                 "absolute_or_unc_path": self.absolute_or_unc_path,
                 "canonical_path": self.canonical_path,
+                "technical_owner": self.technical_owner,
+                "permissions_source": self.permissions_source,
+                "permission_level": self.permission_level,
+                "permissions_assessed": self.permissions_assessed,
+                "acl_inheritance": self.acl_inheritance,
+                "share_acl_evaluated": self.share_acl_evaluated,
                 **common,
             }
         return {"file_path": self.relative_path, **common}
@@ -147,6 +175,10 @@ class ScanResult:
     scan_timed_out: bool = False
     ruleset_version: str = RULESET_VERSION
     score_version: str = SCORE_VERSION
+    application_version: str = APPLICATION_VERSION
+    corporate_profile_version: str = CORPORATE_PROFILE_VERSION
+    path_policy_version: str = PATH_POLICY_VERSION
+    permission_policy_version: str = PERMISSION_POLICY_VERSION
 
     def record_error(self, exception: BaseException) -> None:
         name = type(exception).__name__
@@ -172,15 +204,11 @@ class ScanResult:
             "ruleset_version": self.ruleset_version,
             "ruleset": ruleset_metadata(),
             "score_version": self.score_version,
+            "application_version": self.application_version,
+            "corporate_profile_version": self.corporate_profile_version,
+            "path_policy_version": self.path_policy_version,
+            "permission_policy_version": self.permission_policy_version,
         }
-
-
-def _is_within(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
 
 
 def _iter_files(root: Path, follow_symlinks: bool, on_error: Callable[[OSError], None]) -> Iterator[Path]:
@@ -193,30 +221,30 @@ def _iter_files(root: Path, follow_symlinks: bool, on_error: Callable[[OSError],
             on_error(exception)
             directory_names[:] = []
             continue
-        if not _is_within(canonical_directory, root) or canonical_directory in seen_directories:
+        if not is_within(canonical_directory, root) or canonical_directory in seen_directories:
             directory_names[:] = []
-            if not _is_within(canonical_directory, root):
+            if not is_within(canonical_directory, root):
                 on_error(PathEscapeError())
             continue
         seen_directories.add(canonical_directory)
         safe_directories = []
         for name in sorted(directory_names):
             candidate = directory_path / name
-            if candidate.is_symlink() and not follow_symlinks:
+            if is_reparse_point(candidate) and not follow_symlinks:
                 continue
             try:
                 canonical = candidate.resolve(strict=True)
             except OSError as exception:
                 on_error(exception)
                 continue
-            if _is_within(canonical, root):
+            if is_within(canonical, root):
                 safe_directories.append(name)
             else:
                 on_error(PathEscapeError())
         directory_names[:] = safe_directories
         for file_name in sorted(file_names):
             path = directory_path / file_name
-            if path.is_symlink() and not follow_symlinks:
+            if is_reparse_point(path) and not follow_symlinks:
                 continue
             yield path
 
@@ -257,6 +285,11 @@ def _file_trace(
         last_modified_at=_iso_timestamp(metadata.st_mtime),
         technical_owner=sanitize_metadata(permissions.owner),
         permissions_source=permissions.source,
+        permission_level=permissions.level,
+        permissions_assessed=not permissions.unknown,
+        acl_inheritance=permissions.acl_inheritance,
+        share_acl_evaluated=permissions.share_acl_evaluated,
+        path_kind=path_kind(original_root),
     )
 
 
@@ -283,9 +316,13 @@ def scan_directory(
     score_weights: ScoreWeights | None = None,
     max_processing_seconds: int | None = None,
     root_id: str | None = None,
+    include_share_acl: bool = True,
+    require_windows_acl: bool = True,
+    require_absolute_root: bool = True,
 ) -> ScanResult:
     """Varre arquivos sem permitir que resolucao canonica escape da raiz autorizada."""
     original_root = str(root)
+    validate_root_syntax(original_root, require_absolute=require_absolute_root)
     root_path = Path(root)
     resolved_root = root_path.expanduser().resolve(strict=True)
     if not resolved_root.is_dir():
@@ -302,7 +339,10 @@ def scan_directory(
         raise ValueError("root_id contem caracteres nao permitidos")
 
     limits = extraction_limits or ExtractionLimits()
-    adapter = permission_adapter or LocalPermissionAdapter()
+    adapter = permission_adapter or default_permission_adapter(
+        include_share_acl=include_share_acl,
+        require_windows_acl=require_windows_acl,
+    )
     governance_metadata = governance or GovernanceMetadata()
     weights = score_weights or ScoreWeights()
     analysis_config = AnalysisConfig(context_window, mode, hmac_secret)
@@ -316,7 +356,7 @@ def scan_directory(
             break
         try:
             canonical_path = path.resolve(strict=True)
-            if not _is_within(canonical_path, resolved_root):
+            if not is_within(canonical_path, resolved_root):
                 raise PathEscapeError()
             metadata = canonical_path.stat()
             if canonical_path.suffix.lower() not in extensions or metadata.st_size > max_file_size:
@@ -334,6 +374,21 @@ def scan_directory(
             )
             result.files.append(trace)
             content = _analyze_file(canonical_path, limits, ocr_language, analysis_config)
+            final_path = path.resolve(strict=True)
+            final_metadata = final_path.stat()
+            identity_before = (metadata.st_dev, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
+            identity_after = (
+                final_metadata.st_dev,
+                final_metadata.st_ino,
+                final_metadata.st_size,
+                final_metadata.st_mtime_ns,
+            )
+            if (
+                final_path != canonical_path
+                or not is_within(final_path, resolved_root)
+                or identity_before != identity_after
+            ):
+                raise FileChangedDuringScanError()
             result.files_scanned += 1
             should_classify = bool(content.cpf_count) or (
                 mode == "full-discovery" and bool(content.sensitive_occurrences)

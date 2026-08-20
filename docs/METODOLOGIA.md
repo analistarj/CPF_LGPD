@@ -13,6 +13,8 @@ O motor separa três conceitos:
 - risco, que prioriza o arquivo após deduplicação por categoria.
 
 O conjunto de regras sensíveis é `lgpd-br-1.0.0`. A metodologia do score é `1.1`.
+A candidata corporativa é `2.2.0rc1`, com políticas `windows-path-1.0` e
+`windows-acl-1.0`. Essas versões operacionais não alteram a taxonomia nem a fórmula do score.
 
 ## Rastreabilidade
 
@@ -83,7 +85,10 @@ Repetições não ampliam a parcela sensível. A quantidade de titulares afeta s
 | desconhecido | 10 |
 
 O adaptador POSIX usa bits de modo e declara a fonte. Ele não presume que leitura por outros seja
-publicação externa. Windows retorna desconhecido enquanto não houver adaptador de ACL configurado.
+publicação externa. No Windows, o adaptador lê DACL e proprietário NTFS por SID. Para UNC, combina
+a DACL do arquivo com a ACL SMB quando ambas são conhecidas. A interseção usa o alcance mais
+restritivo. Negação, ACE não suportada ou consulta parcial produz `unknown`, sem inferência de
+acesso efetivo.
 
 ### Volume, máximo 15
 
@@ -141,8 +146,13 @@ de segredo são removidos dos metadados. Sequências com formato de CPF são mas
 falham na validação matemática.
 
 O relatório técnico contém caminhos completos. O executivo contém raiz lógica e caminho relativo.
-Os dois usam escrita atômica e modo `0600`. ACLs de Windows e controles do armazenamento remoto
-continuam sob responsabilidade do operador.
+Os dois usam escrita atômica. POSIX recebe modo `0600`. Windows recebe DACL protegida para o
+operador, `SYSTEM` e `Administrators`. No modo estrito, falha de proteção impede a publicação e
+remove o temporário. O diretório de destino e os controles do armazenamento continuam sob
+responsabilidade do operador.
+
+O relatório executivo também omite proprietário técnico e metadados detalhados de ACL. Esses
+campos permanecem no relatório técnico protegido.
 
 ## Revisão e remediação
 

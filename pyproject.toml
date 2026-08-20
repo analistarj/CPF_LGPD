@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cpf-lgpd"
-version = "2.1.0"
+version = "2.2.0rc1"
 description = "Descoberta rastreavel e classificacao deterministica de indicadores LGPD"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,6 +14,7 @@ dependencies = [
   "Pillow>=10,<13",
   "pypdf>=5,<7",
   "pytesseract>=0.3.13,<0.4",
+  "pywin32>=308; platform_system == 'Windows'",
   "xlrd>=2,<3",
 ]
 

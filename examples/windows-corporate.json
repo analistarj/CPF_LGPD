@@ -1,0 +1,23 @@
+{
+  "mode": "cpf-anchor",
+  "context_window": 500,
+  "max_file_size_mb": 50,
+  "max_processing_seconds": 3600,
+  "max_age_days": 1825,
+  "extensions": ["txt", "csv", "json", "xml", "pdf", "docx", "xlsx"],
+  "permission_mode": "strict",
+  "include_share_acl": true,
+  "report_protection_mode": "strict",
+  "require_absolute_root": true,
+  "allow_reports_inside_root": false,
+  "weights": {
+    "cpf": 5,
+    "content_cap": 40
+  },
+  "governance": {
+    "purpose": "unknown",
+    "legal_basis": "unknown",
+    "origin": "unknown",
+    "retention_deadline": "unknown"
+  }
+}
