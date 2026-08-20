@@ -1,98 +1,145 @@
 # CPF LGPD
 
-Ferramenta local para descobrir **CPFs validos**, classificar indicadores contextuais de dados
-pessoais, calcular risco explicavel e recomendar revisao e remediacao. A implementacao aplica
-minimizacao: o numero encontrado nunca e exibido nem armazenado no relatorio.
+Ferramenta local para localizar CPFs matematicamente válidos, registrar a localização estrutural
+dos achados e classificar indicadores de dados pessoais sensíveis com regras determinísticas,
+explicáveis e versionadas.
 
-> Esta ferramenta apoia inventario e remediacao; ela nao determina, sozinha, conformidade com
-> a LGPD. Toda execucao deve ter finalidade, escopo, autorizacao e retencao definidos pelo
-> controlador, com participacao das areas de privacidade e seguranca.
+O número encontrado, o nome da pessoa, o valor sensível, a célula e o trecho do documento nunca
+são gravados nos relatórios ou logs. O resultado apoia inventário e revisão, mas não determina
+sozinho conformidade, licitude ou violação da LGPD.
+
+## Versões metodológicas
+
+- regras sensíveis: `lgpd-br-1.0.0`;
+- score de risco: `1.1`;
+- fundamento das regras: `LGPD_ART_5_II`.
+
+A taxonomia, fórmulas, indicadores, negativas e processo de revisão estão em
+[Regras de dados pessoais sensíveis](docs/SENSITIVE_DATA_RULES.md). A composição completa do risco
+está em [Metodologia](docs/METODOLOGIA.md).
 
 ## Requisitos
 
 - Python 3.10 ou superior;
-- permissao de leitura apenas no escopo aprovado;
-- no Windows, acesso previamente autenticado ao compartilhamento UNC, quando aplicavel.
+- leitura autorizada somente nas raízes aprovadas;
+- autenticação prévia do sistema operacional para compartilhamentos UNC;
+- Tesseract OCR para imagens;
+- `antiword` para Word binário `.doc`.
 
-Para OCR de imagens, instale tambem o **Tesseract OCR** e o pacote de idioma desejado (por
-padrao, `por`). Para arquivos Word binarios `.doc`, instale o executavel **antiword**. Essas
-ferramentas externas nao sao instaladas pelo `pip`.
+Não passe credenciais de rede, LDAP, HMAC ou armazenamento pela linha de comando. Use autenticação
+integrada e cofre corporativo com privilégio mínimo.
 
-O scanner nao recebe nem armazena credenciais de LDAP. Prefira autenticacao integrada ou um
-cofre corporativo e uma conta de servico com privilegio minimo.
-
-## Instalacao
-
-Em um ambiente virtual:
+## Instalação
 
 ```bash
 python -m venv .venv
-. .venv/bin/activate             # Windows: .venv\Scripts\activate
+. .venv/bin/activate
 python -m pip install .
 ```
 
-As bibliotecas Python para PDF, imagens, OCR e planilhas legadas sao instaladas automaticamente.
+No Windows, a ativação usual é `.venv\Scripts\activate`.
 
 ## Uso
 
 ```bash
-cpf-lgpd /dados/aprovados
-cpf-lgpd '\\servidor\compartilhamento' --report ./resultado.json
-cpf-lgpd /dados --extension txt --extension csv --max-file-size-mb 25
-cpf-lgpd /dados --ocr-language por
-cpf-lgpd /dados --mode cpf-anchor --report resultado.json --csv-report resultado.csv
+cpf-lgpd /dados/autorizados --root-id area-controlada
+cpf-lgpd '\\servidor\compartilhamento' --root-id compartilhamento-rh
+cpf-lgpd /dados --report tecnico.json --executive-report executivo.json
+cpf-lgpd /dados --csv-report tecnico.csv --executive-csv-report executivo.csv
+cpf-lgpd /dados --mode cpf-anchor --extension csv --extension xlsx
 cpf-lgpd /dados --config configuracao.json
 ```
 
-### Formatos examinados
+`cpf-anchor` é o modo padrão. Uma classificação sensível só é confirmada quando um CPF válido,
+uma evidência explícita e um vínculo forte aparecem na mesma unidade verificável.
 
-| Categoria | Formatos | Metodo e observacoes |
-|---|---|---|
-| Texto | CSV, HTML, JSON, LOG, Markdown, RTF, SQL, TXT, XML e YAML | leitura UTF-8 em blocos |
-| PDF | PDF | extracao da camada de texto com `pypdf`; PDF apenas com imagem requer OCR separado |
-| Word | DOCX e DOC | XML interno para DOCX; `antiword` externo para DOC |
-| Planilhas | XLSX e XLS | XML interno para XLSX; `xlrd` para XLS |
-| Imagens/OCR | BMP, GIF, JPEG, PNG, TIFF e WebP | Pillow, `pytesseract` e Tesseract externo |
-| Compactados | ZIP, TAR, TAR.GZ/TGZ, TAR.BZ2 e TAR.XZ | membros em memoria, sem extracao no disco |
-| Bancos | DB, DB3, SQLITE e SQLITE3 | somente SQLite, aberto em modo somente leitura |
+`full-discovery` aceita outro identificador pessoal explícito como âncora. Indicador sem âncora ou
+sem vínculo permanece `possivel_ocorrencia`, exige revisão e adiciona zero ao risco.
 
-Outros formatos sao ignorados. Arquivos maiores que 50 MiB sao ignorados por padrao. Arquivos
-compactados possuem limites adicionais de profundidade, numero de membros, tamanho individual
-e tamanho descompactado total para reduzir risco de zip bomb.
+## Rastreabilidade
 
-Codigos de saida:
+O inventário registra, para cada arquivo analisado:
 
-| Codigo | Significado |
-|---:|---|
-| `0` | varredura concluida sem CPF valido |
-| `1` | varredura concluida com ao menos um CPF valido |
-| `2` | configuracao, caminho ou escrita de relatorio falhou |
+- `root_id`;
+- caminho original;
+- caminho absoluto ou UNC;
+- caminho canônico;
+- caminho relativo à raiz;
+- nome, extensão e tamanho;
+- data de criação quando o sistema realmente a fornece;
+- data da última modificação;
+- proprietário técnico quando disponível;
+- fonte das permissões;
+- `created_by` e `last_modified_by` como `unknown` sem fonte confiável de auditoria.
 
-Falhas isoladas de leitura nao interrompem o restante do trabalho. Elas aparecem de forma
-agregada no resumo e no relatorio.
+O scanner resolve os caminhos antes da leitura e impede saída da raiz por link simbólico, junction
+ou caminho relativo. Credenciais incorporadas em URL ou caminho são removidas dos metadados. O
+próprio caminho deve ser tratado como informação confidencial.
 
-## Modos e classificacao
+## Localização por formato
 
-`cpf-anchor` e o modo padrao e somente classifica arquivos com pelo menos um CPF valido.
-`full-discovery` e uma estrutura experimental para evolucao: atualmente pode registrar regras
-contextuais mesmo sem CPF, sempre como indicador sujeito a revisao, e nao como conclusao sobre
-ilicitude ou violacao da LGPD.
+| Formato | Localização produzida |
+|---|---|
+| CSV | linha, coluna e cabeçalho |
+| XLSX e XLS | planilha, linha, coluna e cabeçalho |
+| JSON | JSONPath e objeto do registro |
+| XML | XPath e elemento do registro |
+| PDF | página e linha da camada textual |
+| DOCX | parágrafo ou tabela, linha e coluna |
+| TXT e outros textos | número da linha |
+| SQLite | tabela, linha e coluna |
+| compactados | membro e localização do formato interno |
+| imagens | linha de OCR, com penalidade de ambiguidade |
 
-Cada achado inclui score total, nivel, metodologia `1.0`, confianca separada, dimensoes,
-categorias, contagens, informacoes desconhecidas e recomendacoes. Consulte
-[a metodologia completa](docs/METODOLOGIA.md).
+Formatos suportados: CSV, HTML, JSON, LOG, Markdown, RTF, SQL, TXT, XML, YAML, PDF, DOCX, DOC,
+XLSX, XLS, imagens comuns, ZIP, TAR e variantes, DB, DB3, SQLITE e SQLITE3.
 
-Para deduplicar CPFs entre ocorrencias sem persisti-los, defina um segredo forte em variavel de
-ambiente. Sem segredo, nenhum identificador persistente e produzido:
+Arquivos maiores que 50 MiB são ignorados por padrão. Compactados têm limites de profundidade,
+membros e tamanho descompactado para reduzir risco de zip bomb. Arquivos criptografados não são
+quebrados.
 
-```bash
-export CPF_LGPD_HMAC_SECRET="valor-longo-obtido-de-um-cofre"
-cpf-lgpd /dados --report resultado.json
+## Confiança e risco
+
+`confidence_score` mede evidência e vínculo. `risk_score` prioriza o arquivo. Um não é somado ao
+outro.
+
+- confiança de 85 a 100: alta;
+- confiança de 70 a 84: média;
+- abaixo de 70: possível ocorrência, zero ponto sensível;
+- uma categoria sensível média: 15 pontos;
+- uma categoria sensível alta: 20 pontos;
+- duas ou mais categorias médias ou altas: 25 pontos no total;
+- parcela sensível: máximo 25;
+- dimensão de conteúdo: máximo 40.
+
+A quantidade de palavras não altera essa pontuação. O número de titulares é representado pela
+dimensão de volume.
+
+## Relatórios
+
+O relatório técnico contém os caminhos completos. O executivo contém `root_id` e caminho relativo.
+JSON e CSV incluem, quando aplicável:
+
+```text
+file_path, relative_path, root_id, location, rule_id, legal_category, subtype,
+confidence_score, confidence_level, risk_points, match_count, requires_human_review,
+ruleset_version, score_version
 ```
 
-Nao passe o segredo na linha de comando nem o coloque no arquivo de configuracao.
+Os arquivos são gravados atomicamente com permissão `0600`. Em Windows e armazenamentos remotos,
+o operador também deve configurar ACLs adequadas. Grave os relatórios fora da árvore examinada,
+restrinja o acesso, use criptografia em repouso e aplique retenção curta.
 
-Exemplo de configuracao local:
+HMAC é opcional para deduplicação sem persistir o CPF:
+
+```bash
+export CPF_LGPD_HMAC_SECRET="valor-obtido-de-cofre"
+cpf-lgpd /dados --report tecnico.json
+```
+
+Sem segredo, nenhum identificador persistente é produzido.
+
+## Configuração
 
 ```json
 {
@@ -107,27 +154,6 @@ Exemplo de configuracao local:
 }
 ```
 
-## Saida e privacidade
-
-O terminal apresenta apenas contagens. O JSON opcional inclui caminhos e contagens por arquivo,
-classificacao e recomendacoes, mas **nao inclui CPFs**. O CSV oferece uma visao tabular resumida.
-Ambos sao criados atomicamente com permissao `0600`; ACLs em Windows e
-armazenamentos remotos ainda devem ser configuradas pelo operador.
-
-Como caminhos podem revelar nomes de pessoas, departamentos ou casos, trate o relatorio como
-informacao confidencial:
-
-1. grave-o fora da arvore examinada;
-2. limite acesso e habilite criptografia em repouso;
-3. nao envie o arquivo a logs, tickets ou canais publicos;
-4. defina e cumpra um prazo curto de retencao;
-5. registre aprovacao, responsavel, escopo e descarte da execucao.
-
-O scanner nao segue links simbolicos. Texto simples e lido em blocos; formatos que dependem de
-bibliotecas de terceiros podem ser carregados em memoria, sempre sujeitos ao limite por arquivo.
-Somente UTF-8 e aceito para texto simples; arquivos com outra codificacao sao contabilizados
-como falha, evitando interpretacao silenciosamente incorreta.
-
 ## Desenvolvimento
 
 ```bash
@@ -136,30 +162,22 @@ ruff check .
 python -m unittest discover -v
 coverage run -m unittest discover
 coverage report
+python -m build
 ```
 
-Use apenas CPFs sintéticos validos destinados a testes. Nunca inclua dados pessoais reais em
-fixtures, commits, issues ou pull requests.
+Use somente dados artificiais em testes, fixtures, commits e issues.
 
-## Limitacoes
+## Limitações
 
-- bancos que nao sejam SQLite, arquivos criptografados e formatos proprietarios nao sao lidos;
-- PDF digitalizado nao passa automaticamente por OCR nesta versao; converta suas paginas em
-  imagens dentro de um fluxo aprovado se essa cobertura for necessaria;
-- OCR pode produzir falsos positivos e falsos negativos e exige revisao humana;
-- arquivos protegidos por senha sao registrados como falha, sem tentativa de quebra de senha;
-- a presenca de um CPF nao demonstra uso indevido: o contexto deve ser revisado por pessoa
-  autorizada;
-- o relatorio indica onde revisar, mas nao deve ser usado para republicar o dado encontrado;
-- varreduras em grande escala devem ser planejadas para evitar impacto em rede e armazenamento.
-- as regras deterministicas podem produzir falsos positivos e falsos negativos;
-- nenhum resultado afirma automaticamente ilegalidade ou violacao da LGPD e toda classificacao
-  exige validacao humana pelo responsavel apropriado.
+- PDF digitalizado depende de OCR em fluxo separado ou de imagem suportada;
+- OCR e extração de PDF podem gerar falsos positivos ou negativos;
+- bancos não SQLite e formatos proprietários não são lidos;
+- ACL de Windows ainda exige adaptador específico e aparece como desconhecida;
+- ausência de achado não comprova ausência de dado pessoal;
+- a ferramenta não infere atributo sensível por nome, fotografia, endereço ou estatística;
+- nenhuma ação de exclusão, movimentação, criptografia ou quarentena é executada.
 
-## Seguranca
+## Segurança e licença
 
 Consulte [SECURITY.md](SECURITY.md) para comunicar vulnerabilidades sem divulgar dados pessoais.
-
-## Licenca
-
-Distribuido sob a [GNU General Public License v3.0](LICENSE).
+Distribuído sob a [GNU General Public License v3.0](LICENSE).

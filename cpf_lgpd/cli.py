@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 
 from .configuration import load_config
-from .reporting import write_csv_report, write_json_report
+from .reporting import (
+    write_csv_report,
+    write_executive_csv_report,
+    write_executive_json_report,
+    write_json_report,
+)
 from .scanner import DEFAULT_EXTENSIONS, scan_directory
 
 
@@ -25,8 +30,15 @@ def build_parser() -> argparse.ArgumentParser:
         description="Localiza CPFs validos sem exibir ou armazenar os numeros encontrados.",
     )
     parser.add_argument("directory", type=Path, help="diretorio ou compartilhamento UNC autorizado")
-    parser.add_argument("--report", type=Path, help="relatorio JSON protegido (opcional)")
-    parser.add_argument("--csv-report", type=Path, help="relatorio CSV protegido (opcional)")
+    parser.add_argument("--report", type=Path, help="relatorio tecnico JSON protegido")
+    parser.add_argument("--csv-report", type=Path, help="relatorio tecnico CSV protegido")
+    parser.add_argument(
+        "--executive-report", type=Path, help="relatorio executivo JSON sem caminho completo"
+    )
+    parser.add_argument(
+        "--executive-csv-report", type=Path, help="relatorio executivo CSV sem caminho completo"
+    )
+    parser.add_argument("--root-id", help="identificador logico da raiz autorizada")
     parser.add_argument("--config", type=Path, help="configuracao JSON local")
     parser.add_argument(
         "--mode", choices=("cpf-anchor", "full-discovery"), help="modo de descoberta"
@@ -80,11 +92,16 @@ def main(argv: list[str] | None = None) -> int:
             governance=config.governance,
             score_weights=config.weights,
             max_processing_seconds=args.max_processing_seconds or config.max_processing_seconds,
+            root_id=args.root_id,
         )
         if args.report:
             write_json_report(args.report, result)
         if args.csv_report:
             write_csv_report(args.csv_report, result)
+        if args.executive_report:
+            write_executive_json_report(args.executive_report, result)
+        if args.executive_csv_report:
+            write_executive_csv_report(args.executive_csv_report, result)
     except (OSError, ValueError) as exception:
         print(f"Erro operacional: {type(exception).__name__}", file=sys.stderr)
         return 2
@@ -98,6 +115,10 @@ def main(argv: list[str] | None = None) -> int:
         print("Relatorio protegido gravado com sucesso.")
     if args.csv_report:
         print("Relatorio CSV protegido gravado com sucesso.")
+    if args.executive_report:
+        print("Relatorio executivo protegido gravado com sucesso.")
+    if args.executive_csv_report:
+        print("Relatorio executivo CSV protegido gravado com sucesso.")
     return 1 if result.valid_cpfs else 0
 
 

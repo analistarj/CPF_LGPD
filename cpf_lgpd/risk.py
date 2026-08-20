@@ -6,10 +6,10 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .classification import SENSITIVE_RULES, ContentAnalysis
+from .classification import ContentAnalysis
 from .permissions import PermissionAssessment
 
-SCORE_VERSION = "1.0"
+SCORE_VERSION = "1.1"
 ADDITIONAL_IDENTIFIERS = {
     "nome",
     "email",
@@ -29,8 +29,6 @@ class ScoreWeights:
     additional_cap: int = 10
     high_impact_one: int = 10
     high_impact_multiple: int = 15
-    sensitive_one: int = 20
-    sensitive_multiple: int = 25
     content_cap: int = 40
     exposure_unknown: int = 10
     owner_unknown: int = 5
@@ -97,11 +95,14 @@ def assess_risk(
     weights: ScoreWeights,
 ) -> RiskAssessment:
     categories = set(content.categories)
-    scored_sensitive = {
-        name
-        for name in categories & set(SENSITIVE_RULES)
-        if content.categories[name].confidence in {"media", "alta"}
-    }
+    sensitive_confidence: dict[str, str] = {}
+    for occurrence in content.sensitive_occurrences:
+        if occurrence.confidence_level not in {"media", "alta"}:
+            continue
+        previous = sensitive_confidence.get(occurrence.legal_category)
+        if previous != "alta":
+            sensitive_confidence[occurrence.legal_category] = occurrence.confidence_level
+    scored_sensitive = set(sensitive_confidence)
     identifiers = categories & ADDITIONAL_IDENTIFIERS
     high_impact = categories & HIGH_IMPACT
     content_points = weights.cpf if content.cpf_count else 0
@@ -110,10 +111,11 @@ def assess_risk(
         content_points += (
             weights.high_impact_one if len(high_impact) == 1 else weights.high_impact_multiple
         )
-    if scored_sensitive:
-        content_points += (
-            weights.sensitive_one if len(scored_sensitive) == 1 else weights.sensitive_multiple
-        )
+    if len(scored_sensitive) >= 2:
+        content_points += 25
+    elif len(scored_sensitive) == 1:
+        only_category = next(iter(scored_sensitive))
+        content_points += 20 if sensitive_confidence[only_category] == "alta" else 15
     content_points = max(0, min(content_points, 40, weights.content_cap))
 
     unknown: list[str] = []

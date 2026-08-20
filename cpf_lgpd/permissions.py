@@ -15,6 +15,7 @@ class PermissionAssessment:
     score: int = 10
     owner: str = "unknown"
     unknown: bool = True
+    source: str = "unavailable"
 
 
 class PermissionAdapter(Protocol):
@@ -26,7 +27,7 @@ class LocalPermissionAdapter:
 
     def assess(self, path: Path) -> PermissionAssessment:
         if os.name == "nt":
-            return PermissionAssessment()
+            return PermissionAssessment(source="windows_acl_adapter_not_configured")
         try:
             metadata = path.stat()
             import pwd
@@ -34,9 +35,9 @@ class LocalPermissionAdapter:
             owner = pwd.getpwuid(metadata.st_uid).pw_name
             mode = stat.S_IMODE(metadata.st_mode)
         except (KeyError, OSError, ImportError):
-            return PermissionAssessment()
+            return PermissionAssessment(source="posix_stat_failed")
         if mode & stat.S_IROTH:
-            return PermissionAssessment("internal_all", 22, owner, False)
+            return PermissionAssessment("internal_all", 22, owner, False, "posix_mode_bits")
         if mode & stat.S_IRGRP:
-            return PermissionAssessment("internal_limited", 5, owner, False)
-        return PermissionAssessment("owner_restricted", 0, owner, False)
+            return PermissionAssessment("internal_limited", 5, owner, False, "posix_mode_bits")
+        return PermissionAssessment("owner_restricted", 0, owner, False, "posix_mode_bits")

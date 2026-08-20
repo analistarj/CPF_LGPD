@@ -1,108 +1,269 @@
-"""Motor de varredura de arquivos para CPFs validos."""
+"""Varredura segura, rastreavel e confinada a raizes autorizadas."""
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import time
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .classification import (
     AnalysisConfig,
     ContextAnalyzer,
+    is_valid_cpf as is_valid_cpf,
     redact_cpfs,
 )
-from .classification import (
-    is_valid_cpf as is_valid_cpf,
-)
-from .extractors import SUPPORTED_EXTENSIONS, ExtractionError, ExtractionLimits, iter_text_path
-from .permissions import LocalPermissionAdapter, PermissionAdapter
-from .risk import GovernanceMetadata, RiskAssessment, ScoreWeights, assess_risk
+from .extractors import SUPPORTED_EXTENSIONS, ExtractionError, ExtractionLimits, iter_units_path
+from .permissions import LocalPermissionAdapter, PermissionAdapter, PermissionAssessment
+from .risk import SCORE_VERSION, GovernanceMetadata, RiskAssessment, ScoreWeights, assess_risk
+from .rules import RULESET_VERSION, ruleset_metadata
 
 DEFAULT_EXTENSIONS = SUPPORTED_EXTENSIONS
+_URL_CREDENTIALS = re.compile(r"(?i)([a-z][a-z0-9+.-]*://)([^/@\s]+)@")
+_SECRET_QUERY = re.compile(r"(?i)([?&](?:token|password|passwd|secret|key|sig|credential)=)[^&#/\\]+")
+
+
+class PathEscapeError(OSError):
+    """Caminho canonico saiu da raiz autorizada."""
+
+
+def sanitize_metadata(value: str) -> str:
+    """Remove CPFs em formato numerico e credenciais incorporadas em caminhos/URLs."""
+    value = _URL_CREDENTIALS.sub(r"\1[credentials-redacted]@", value)
+    value = _SECRET_QUERY.sub(r"\1[redacted]", value)
+    return redact_cpfs(value)
+
+
+def _sanitize_structure(value: object) -> object:
+    if isinstance(value, str):
+        return sanitize_metadata(value)
+    if isinstance(value, dict):
+        return {str(key): _sanitize_structure(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_structure(item) for item in value]
+    return value
+
+
+def _iso_timestamp(timestamp: float) -> str:
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+@dataclass(frozen=True)
+class FileTrace:
+    root_id: str
+    original_path: str
+    absolute_or_unc_path: str
+    canonical_path: str
+    relative_path: str
+    name: str
+    extension: str
+    size_bytes: int
+    created_at: str
+    last_modified_at: str
+    technical_owner: str
+    permissions_source: str
+    created_by: str = "unknown"
+    last_modified_by: str = "unknown"
+
+    def to_dict(self, report_level: str) -> dict[str, object]:
+        common = {
+            "root_id": self.root_id,
+            "relative_path": self.relative_path,
+            "name": self.name,
+            "extension": self.extension,
+            "size_bytes": self.size_bytes,
+            "created_at": self.created_at,
+            "last_modified_at": self.last_modified_at,
+            "technical_owner": self.technical_owner,
+            "permissions_source": self.permissions_source,
+            "created_by": self.created_by,
+            "last_modified_by": self.last_modified_by,
+        }
+        if report_level == "technical":
+            return {
+                "file_path": self.canonical_path,
+                "original_path": self.original_path,
+                "absolute_or_unc_path": self.absolute_or_unc_path,
+                "canonical_path": self.canonical_path,
+                **common,
+            }
+        return {"file_path": self.relative_path, **common}
 
 
 @dataclass(frozen=True)
 class Finding:
-    """Resultado agregado; nunca armazena o CPF encontrado."""
+    """Resultado agregado que nunca contem valores pessoais ou trechos."""
 
-    path: str
+    trace: FileTrace
     count: int
     unique_cpf_count: int
     detected_categories: list[dict[str, object]]
+    occurrences: list[dict[str, object]]
     risk: RiskAssessment
     cpf_hmac_ids: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict[str, object]:
+    @property
+    def path(self) -> str:
+        return self.trace.canonical_path
+
+    def to_dict(self, report_level: str = "technical") -> dict[str, object]:
+        trace = self.trace.to_dict(report_level)
         return {
-            "file_path": self.path,
-            "path": self.path,
+            **trace,
             "cpf_count": self.count,
             "count": self.count,
             "unique_cpf_count": self.unique_cpf_count,
             "detected_categories": self.detected_categories,
+            "occurrences": self.occurrences,
             "cpf_hmac_ids": self.cpf_hmac_ids,
+            "ruleset_version": RULESET_VERSION,
             **self.risk.to_dict(),
         }
 
 
 @dataclass
 class ScanResult:
-    """Resumo serializavel de uma varredura."""
+    """Inventario e achados serializaveis em nivel tecnico ou executivo."""
 
     root: str
+    root_id: str
     mode: str = "cpf-anchor"
     files_scanned: int = 0
     files_skipped: int = 0
     files_failed: int = 0
     valid_cpfs: int = 0
+    files: list[FileTrace] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     errors: dict[str, int] = field(default_factory=dict)
     scan_timed_out: bool = False
+    ruleset_version: str = RULESET_VERSION
+    score_version: str = SCORE_VERSION
 
     def record_error(self, exception: BaseException) -> None:
         name = type(exception).__name__
         self.errors[name] = self.errors.get(name, 0) + 1
         self.files_failed += 1
 
-    def to_dict(self) -> dict[str, object]:
-        payload = asdict(self)
-        payload["findings"] = [finding.to_dict() for finding in self.findings]
-        return payload
+    def to_dict(self, report_level: str = "technical") -> dict[str, object]:
+        if report_level not in {"technical", "executive"}:
+            raise ValueError("report_level deve ser technical ou executive")
+        return {
+            "report_level": report_level,
+            "root": self.root if report_level == "technical" else self.root_id,
+            "root_id": self.root_id,
+            "mode": self.mode,
+            "files_scanned": self.files_scanned,
+            "files_skipped": self.files_skipped,
+            "files_failed": self.files_failed,
+            "valid_cpfs": self.valid_cpfs,
+            "files": [item.to_dict(report_level) for item in self.files],
+            "findings": [finding.to_dict(report_level) for finding in self.findings],
+            "errors": dict(sorted(self.errors.items())),
+            "scan_timed_out": self.scan_timed_out,
+            "ruleset_version": self.ruleset_version,
+            "ruleset": ruleset_metadata(),
+            "score_version": self.score_version,
+        }
 
 
-def _iter_files(
-    root: Path, follow_symlinks: bool, on_error: Callable[[OSError], None]
-) -> Iterator[Path]:
-    for directory, directory_names, file_names in os.walk(
-        root, followlinks=follow_symlinks, onerror=on_error
-    ):
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _iter_files(root: Path, follow_symlinks: bool, on_error: Callable[[OSError], None]) -> Iterator[Path]:
+    seen_directories: set[Path] = set()
+    for directory, directory_names, file_names in os.walk(root, followlinks=follow_symlinks, onerror=on_error):
         directory_path = Path(directory)
-        if not follow_symlinks:
-            directory_names[:] = [
-                name for name in directory_names if not (directory_path / name).is_symlink()
-            ]
-        for file_name in file_names:
+        try:
+            canonical_directory = directory_path.resolve(strict=True)
+        except OSError as exception:
+            on_error(exception)
+            directory_names[:] = []
+            continue
+        if not _is_within(canonical_directory, root) or canonical_directory in seen_directories:
+            directory_names[:] = []
+            if not _is_within(canonical_directory, root):
+                on_error(PathEscapeError())
+            continue
+        seen_directories.add(canonical_directory)
+        safe_directories = []
+        for name in sorted(directory_names):
+            candidate = directory_path / name
+            if candidate.is_symlink() and not follow_symlinks:
+                continue
+            try:
+                canonical = candidate.resolve(strict=True)
+            except OSError as exception:
+                on_error(exception)
+                continue
+            if _is_within(canonical, root):
+                safe_directories.append(name)
+            else:
+                on_error(PathEscapeError())
+        directory_names[:] = safe_directories
+        for file_name in sorted(file_names):
             path = directory_path / file_name
-            if follow_symlinks or not path.is_symlink():
-                yield path
+            if path.is_symlink() and not follow_symlinks:
+                continue
+            yield path
 
 
-def _analyze_file(
+def _root_identifier(canonical_root: Path) -> str:
+    normalized = os.path.normcase(str(canonical_root))
+    return f"root-{hashlib.sha256(normalized.encode()).hexdigest()[:16]}"
+
+
+def _file_trace(
     path: Path,
-    limits: ExtractionLimits,
-    ocr_language: str,
-    analysis_config: AnalysisConfig,
-):
+    canonical_path: Path,
+    canonical_root: Path,
+    original_root: str,
+    root_id: str,
+    metadata: os.stat_result,
+    permissions: PermissionAssessment,
+) -> FileTrace:
+    relative = canonical_path.relative_to(canonical_root)
+    original_path = str(Path(original_root) / relative)
+    absolute_path = str(path) if str(path).startswith("\\\\") else str(path.absolute())
+    if hasattr(metadata, "st_birthtime"):
+        created_at = _iso_timestamp(metadata.st_birthtime)  # type: ignore[attr-defined]
+    elif os.name == "nt":
+        created_at = _iso_timestamp(metadata.st_ctime)
+    else:
+        created_at = "unknown"
+    return FileTrace(
+        root_id=root_id,
+        original_path=sanitize_metadata(original_path),
+        absolute_or_unc_path=sanitize_metadata(absolute_path),
+        canonical_path=sanitize_metadata(str(canonical_path)),
+        relative_path=sanitize_metadata(str(relative)),
+        name=sanitize_metadata(canonical_path.name),
+        extension=canonical_path.suffix.lower(),
+        size_bytes=metadata.st_size,
+        created_at=created_at,
+        last_modified_at=_iso_timestamp(metadata.st_mtime),
+        technical_owner=sanitize_metadata(permissions.owner),
+        permissions_source=permissions.source,
+    )
+
+
+def _analyze_file(path: Path, limits: ExtractionLimits, ocr_language: str, analysis_config: AnalysisConfig):
     analyzer = ContextAnalyzer(analysis_config)
-    for chunk in iter_text_path(path, limits, ocr_language):
-        analyzer.feed(chunk)
+    for unit in iter_units_path(path, limits, ocr_language):
+        analyzer.feed_unit(unit)
     return analyzer.finish()
 
 
 def scan_directory(
-    root: Path,
+    root: Path | str,
     *,
     extensions: frozenset[str] = DEFAULT_EXTENSIONS,
     max_file_size: int = 50 * 1024 * 1024,
@@ -116,9 +277,12 @@ def scan_directory(
     governance: GovernanceMetadata | None = None,
     score_weights: ScoreWeights | None = None,
     max_processing_seconds: int | None = None,
+    root_id: str | None = None,
 ) -> ScanResult:
-    """Varre arquivos textuais dentro de ``root`` e retorna resultados agregados."""
-    resolved_root = root.expanduser().resolve(strict=True)
+    """Varre arquivos sem permitir que resolucao canonica escape da raiz autorizada."""
+    original_root = str(root)
+    root_path = Path(root)
+    resolved_root = root_path.expanduser().resolve(strict=True)
     if not resolved_root.is_dir():
         raise NotADirectoryError(str(resolved_root))
     if max_file_size <= 0:
@@ -129,13 +293,16 @@ def scan_directory(
         raise ValueError("context_window nao pode ser negativo")
     if max_processing_seconds is not None and max_processing_seconds <= 0:
         raise ValueError("max_processing_seconds deve ser positivo")
+    if root_id is not None and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", root_id):
+        raise ValueError("root_id contem caracteres nao permitidos")
 
     limits = extraction_limits or ExtractionLimits()
     adapter = permission_adapter or LocalPermissionAdapter()
     governance_metadata = governance or GovernanceMetadata()
     weights = score_weights or ScoreWeights()
     analysis_config = AnalysisConfig(context_window, mode, hmac_secret)
-    result = ScanResult(root=redact_cpfs(str(resolved_root)), mode=mode)
+    effective_root_id = root_id or _root_identifier(resolved_root)
+    result = ScanResult(sanitize_metadata(str(resolved_root)), effective_root_id, mode=mode)
     started_at = time.monotonic()
     for path in _iter_files(resolved_root, follow_symlinks, result.record_error):
         if max_processing_seconds and time.monotonic() - started_at >= max_processing_seconds:
@@ -143,24 +310,47 @@ def scan_directory(
             result.errors["ProcessingTimeLimit"] = 1
             break
         try:
-            if path.suffix.lower() not in extensions or path.stat().st_size > max_file_size:
+            canonical_path = path.resolve(strict=True)
+            if not _is_within(canonical_path, resolved_root):
+                raise PathEscapeError()
+            metadata = canonical_path.stat()
+            if canonical_path.suffix.lower() not in extensions or metadata.st_size > max_file_size:
                 result.files_skipped += 1
                 continue
-            content = _analyze_file(path, limits, ocr_language, analysis_config)
+            permissions = adapter.assess(canonical_path)
+            trace = _file_trace(
+                path,
+                canonical_path,
+                resolved_root,
+                original_root,
+                effective_root_id,
+                metadata,
+                permissions,
+            )
+            result.files.append(trace)
+            content = _analyze_file(canonical_path, limits, ocr_language, analysis_config)
             result.files_scanned += 1
             should_classify = bool(content.cpf_count) or (
-                mode == "full-discovery" and bool(content.categories)
+                mode == "full-discovery" and bool(content.sensitive_occurrences)
             )
             if should_classify:
                 result.valid_cpfs += content.cpf_count
-                permissions = adapter.assess(path)
-                risk = assess_risk(path, content, permissions, governance_metadata, weights)
+                risk = assess_risk(canonical_path, content, permissions, governance_metadata, weights)
+                occurrences = [
+                    {
+                        **occurrence.to_dict(),
+                        "location": _sanitize_structure(occurrence.location),
+                        "score_version": SCORE_VERSION,
+                    }
+                    for occurrence in content.sensitive_occurrences
+                ]
                 result.findings.append(
                     Finding(
-                        path=redact_cpfs(str(path)),
+                        trace=trace,
                         count=content.cpf_count,
                         unique_cpf_count=content.unique_cpf_count,
                         detected_categories=content.serializable_categories(),
+                        occurrences=occurrences,
                         risk=risk,
                         cpf_hmac_ids=content.cpf_hmac_ids,
                     )

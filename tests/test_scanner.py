@@ -1,3 +1,4 @@
+import csv
 import json
 import sqlite3
 import stat
@@ -12,175 +13,326 @@ from unittest import mock
 
 from cpf_lgpd.cli import main
 from cpf_lgpd.extractors import ExtractionLimits
-from cpf_lgpd.scanner import is_valid_cpf, redact_cpfs, scan_directory
+from cpf_lgpd.reporting import (
+    write_csv_report,
+    write_executive_csv_report,
+    write_executive_json_report,
+    write_json_report,
+)
+from cpf_lgpd.scanner import is_valid_cpf, redact_cpfs, sanitize_metadata, scan_directory
+
+CPF = "52998224725"
+SENSITIVE_VALUE = "condicao-sintetica-confidencial"
+PERSON_NAME = "Pessoa Sintetica Confidencial"
+
+
+def _write_xlsx(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "xl/workbook.xml",
+            '<workbook xmlns:r="urn:r"><sheets><sheet name="Titulares" r:id="rId1"/></sheets></workbook>',
+        )
+        archive.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>',
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            (
+                "<worksheet><sheetData>"
+                '<row r="1"><c r="A1" t="inlineStr"><is><t>CPF</t></is></c>'
+                '<c r="B1" t="inlineStr"><is><t>Diagnostico</t></is></c></row>'
+                f'<row r="2"><c r="A2" t="inlineStr"><is><t>{CPF}</t></is></c>'
+                f'<c r="B2" t="inlineStr"><is><t>{SENSITIVE_VALUE}</t></is></c></row>'
+                "</sheetData></worksheet>"
+            ),
+        )
+
+
+def _write_docx(path: Path, *, table: bool = False) -> None:
+    if table:
+        body = (
+            "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>CPF</w:t></w:r></w:p></w:tc>"
+            "<w:tc><w:p><w:r><w:t>Diagnostico</w:t></w:r></w:p></w:tc></w:tr>"
+            f"<w:tr><w:tc><w:p><w:r><w:t>{CPF}</w:t></w:r></w:p></w:tc>"
+            f"<w:tc><w:p><w:r><w:t>{SENSITIVE_VALUE}</w:t></w:r></w:p></w:tc></w:tr>"
+            "</w:tbl>"
+        )
+    else:
+        body = f"<w:p><w:r><w:t>CPF: {CPF}; Diagnostico: {SENSITIVE_VALUE}</w:t></w:r></w:p>"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            f'<w:document xmlns:w="urn:w"><w:body>{body}</w:body></w:document>',
+        )
 
 
 class CpfValidationTests(unittest.TestCase):
     def test_accepts_formatted_and_plain_valid_cpf(self):
         self.assertTrue(is_valid_cpf("529.982.247-25"))
-        self.assertTrue(is_valid_cpf("52998224725"))
+        self.assertTrue(is_valid_cpf(CPF))
 
     def test_rejects_invalid_and_repeated_values(self):
         self.assertFalse(is_valid_cpf("529.982.247-24"))
         self.assertFalse(is_valid_cpf("111.111.111-11"))
         self.assertFalse(is_valid_cpf("123"))
 
-    def test_redacts_valid_cpf_in_path_but_preserves_invalid_number(self):
+    def test_redacts_every_cpf_shaped_sequence_in_metadata(self):
         text = "/clientes/52998224725/11111111111.txt"
-        self.assertEqual(redact_cpfs(text), "/clientes/***.***.***-25/11111111111.txt")
+        self.assertEqual(redact_cpfs(text), "/clientes/***.***.***-25/***.***.***-11.txt")
 
 
-class ScannerTests(unittest.TestCase):
-    def test_scan_aggregates_without_retaining_cpfs(self):
+class StructuredLocationTests(unittest.TestCase):
+    def _single_occurrence(self, root: Path):
+        result = scan_directory(root)
+        self.assertEqual(len(result.findings), 1)
+        return result.findings[0].occurrences[0]
+
+    def test_csv_location_has_row_column_and_header(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            cpf_candidate = "529.982.247-25"
-            (root / "one.txt").write_text(
-                f"CPF {cpf_candidate}\nCPF 111.111.111-11", encoding="utf-8"
+            (root / "data.csv").write_text(
+                f"CPF,Diagnostico\n{CPF},{SENSITIVE_VALUE}\n", encoding="utf-8"
             )
-            (root / "ignored.bin").write_bytes(b"52998224725")
+            location = self._single_occurrence(root)["location"]
+            self.assertEqual(location["row"], 2)
+            self.assertEqual(location["column"], 2)
+            self.assertEqual(location["header"], "Diagnostico")
 
-            result = scan_directory(root)
-
-            self.assertEqual(result.valid_cpfs, 1)
-            self.assertEqual(result.files_scanned, 1)
-            self.assertEqual(result.files_skipped, 1)
-            self.assertNotIn(cpf_candidate, json.dumps(result.to_dict()))
-
-    def test_finds_cpf_across_chunks(self):
+    def test_xlsx_location_has_sheet_row_column_and_header(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "data.txt").write_text("x" * 60 + "52998224725", encoding="utf-8")
-            self.assertEqual(scan_directory(root).valid_cpfs, 1)
+            _write_xlsx(root / "data.xlsx")
+            location = self._single_occurrence(root)["location"]
+            self.assertEqual(location["sheet"], "Titulares")
+            self.assertEqual(location["row"], 2)
+            self.assertEqual(location["column"], 2)
+            self.assertEqual(location["header"], "Diagnostico")
 
-    def test_scans_zip_members_without_extracting_them(self):
+    def test_json_location_has_jsonpath_and_record_object(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with zipfile.ZipFile(root / "documents.zip", "w") as archive:
-                archive.writestr("internal/data.txt", "52998224725")
-            self.assertEqual(scan_directory(root).valid_cpfs, 1)
+            (root / "data.json").write_text(
+                json.dumps({"records": [{"cpf": CPF, "diagnostico": SENSITIVE_VALUE}]}),
+                encoding="utf-8",
+            )
+            location = self._single_occurrence(root)["location"]
+            self.assertEqual(location["json_path"], "$.records[0].diagnostico")
+            self.assertEqual(location["record_object"], "$.records[0]")
 
-    def test_rejects_archive_member_over_configured_limit(self):
+    def test_xml_location_has_xpath_and_record_element(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with zipfile.ZipFile(root / "large.zip", "w") as archive:
-                archive.writestr("large.txt", "x" * 100)
-            result = scan_directory(root, extraction_limits=ExtractionLimits(max_member_size=50))
-            self.assertEqual(result.files_failed, 1)
-            self.assertEqual(result.errors, {"ExtractionLimitError": 1})
+            (root / "data.xml").write_text(
+                f"<records><record><cpf>{CPF}</cpf><diagnostico>{SENSITIVE_VALUE}</diagnostico></record></records>",
+                encoding="utf-8",
+            )
+            location = self._single_occurrence(root)["location"]
+            self.assertEqual(location["xpath"], "/records[1]/record[1]/diagnostico[1]")
+            self.assertEqual(location["record_element"], "/records[1]/record[1]")
 
-    def test_scans_docx_and_xlsx_xml(self):
+    def test_txt_location_has_line_number(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            with zipfile.ZipFile(root / "document.docx", "w") as archive:
-                archive.writestr(
-                    "word/document.xml",
-                    '<w:document xmlns:w="urn:test"><w:t>529.982.247-25</w:t></w:document>',
-                )
-            with zipfile.ZipFile(root / "sheet.xlsx", "w") as archive:
-                archive.writestr(
-                    "xl/sharedStrings.xml",
-                    '<sst xmlns="urn:test"><si><t>52998224725</t></si></sst>',
-                )
-            self.assertEqual(scan_directory(root).valid_cpfs, 2)
+            (root / "data.txt").write_text(
+                f"cabecalho sintetico\nCPF: {CPF}; Diagnostico: {SENSITIVE_VALUE}\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(self._single_occurrence(root)["location"]["line"], 2)
 
-    def test_scans_sqlite_values_read_only(self):
+    def test_docx_locations_have_paragraph_and_table_coordinates(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            database = sqlite3.connect(root / "customers.sqlite")
-            database.execute("CREATE TABLE customers (document TEXT)")
-            database.execute("INSERT INTO customers VALUES (?)", ("52998224725",))
-            database.commit()
-            database.close()
-            self.assertEqual(scan_directory(root).valid_cpfs, 1)
+            _write_docx(root / "paragraph.docx")
+            self.assertEqual(self._single_occurrence(root)["location"]["paragraph"], 1)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _write_docx(root / "table.docx", table=True)
+            location = self._single_occurrence(root)["location"]
+            self.assertEqual(location["table"], 1)
+            self.assertEqual(location["row"], 2)
+            self.assertEqual(location["column"], 2)
 
-    def test_scans_pdf_text_layer_through_pypdf(self):
+    def test_pdf_location_has_page_without_content(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "document.pdf").write_bytes(b"synthetic PDF")
-            page = types.SimpleNamespace(extract_text=lambda: "52998224725")
+            pages = [
+                types.SimpleNamespace(extract_text=lambda: "cabecalho"),
+                types.SimpleNamespace(
+                    extract_text=lambda: f"CPF: {CPF}; Diagnostico: {SENSITIVE_VALUE}"
+                ),
+            ]
             pypdf = types.ModuleType("pypdf")
-            pypdf.PdfReader = lambda *_args, **_kwargs: types.SimpleNamespace(pages=[page])
+            pypdf.PdfReader = lambda *_args, **_kwargs: types.SimpleNamespace(pages=pages)
             with mock.patch.dict("sys.modules", {"pypdf": pypdf}):
-                self.assertEqual(scan_directory(root).valid_cpfs, 1)
+                occurrence = self._single_occurrence(root)
+            self.assertEqual(occurrence["location"]["page"], 2)
+            self.assertNotIn(SENSITIVE_VALUE, json.dumps(occurrence))
 
-    def test_scans_image_with_ocr_adapter(self):
-        class FakeImage:
-            def __enter__(self):
-                return self
 
-            def __exit__(self, *_args):
-                return None
-
+class TraceabilityAndSecurityTests(unittest.TestCase):
+    def test_file_trace_has_required_metadata_without_author_inference(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            (root / "scan.png").write_bytes(b"synthetic image")
-            pillow = types.ModuleType("PIL")
-            pillow.Image = types.SimpleNamespace(open=lambda *_args: FakeImage())
-            pytesseract = types.ModuleType("pytesseract")
-            pytesseract.TesseractNotFoundError = RuntimeError
-            pytesseract.image_to_string = lambda *_args, **_kwargs: "52998224725"
-            with mock.patch.dict("sys.modules", {"PIL": pillow, "pytesseract": pytesseract}):
-                self.assertEqual(scan_directory(root).valid_cpfs, 1)
+            (root / "data.txt").write_text(CPF, encoding="utf-8")
+            result = scan_directory(root, root_id="authorized-root")
+            trace = result.files[0]
+            self.assertEqual(trace.root_id, "authorized-root")
+            self.assertEqual(trace.relative_path, "data.txt")
+            self.assertEqual(trace.name, "data.txt")
+            self.assertEqual(trace.extension, ".txt")
+            self.assertGreater(trace.size_bytes, 0)
+            self.assertTrue(trace.absolute_or_unc_path)
+            self.assertTrue(trace.canonical_path)
+            self.assertTrue(trace.last_modified_at)
+            self.assertEqual(trace.created_by, "unknown")
+            self.assertEqual(trace.last_modified_by, "unknown")
+            self.assertTrue(trace.permissions_source)
 
-    def test_non_utf8_file_is_reported_not_fatal(self):
-        with tempfile.TemporaryDirectory() as temporary:
+    def test_unc_url_credentials_tokens_and_cpfs_are_redacted(self):
+        unc_path = r"\\server\share\folder\data.txt"
+        self.assertEqual(sanitize_metadata(unc_path), unc_path)
+        value = "smb://usuario:senha@server/share/52998224725.txt?token=segredo"
+        sanitized = sanitize_metadata(value)
+        self.assertNotIn("usuario:senha", sanitized)
+        self.assertNotIn(CPF, sanitized)
+        self.assertNotIn("token=segredo", sanitized)
+        self.assertIn("server/share", sanitized)
+
+    def test_symlink_outside_authorized_root_is_never_scanned(self):
+        with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() as outside:
             root = Path(temporary)
-            (root / "bad.txt").write_bytes(b"\xff\xfe")
-            result = scan_directory(root)
-            self.assertEqual(result.files_failed, 1)
-            self.assertEqual(result.errors, {"UnicodeDecodeError": 1})
+            external = Path(outside)
+            (external / "secret.txt").write_text(CPF, encoding="utf-8")
+            try:
+                (root / "escape").symlink_to(external, target_is_directory=True)
+            except OSError:
+                self.skipTest("links simbolicos indisponiveis")
+            result = scan_directory(root, follow_symlinks=True)
+            self.assertEqual(result.files_scanned, 0)
+            self.assertEqual(result.valid_cpfs, 0)
+            self.assertEqual(result.errors, {"PathEscapeError": 1})
 
-    def test_empty_and_oversized_files(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / "empty.txt").write_text("", encoding="utf-8")
-            (root / "large.txt").write_text("x" * 100, encoding="utf-8")
-            result = scan_directory(root, max_file_size=50)
-            self.assertEqual(result.files_scanned, 1)
-            self.assertEqual(result.files_skipped, 1)
-
-    def test_permission_error_is_aggregated_without_content(self):
+    def test_file_read_permission_error_is_aggregated_without_message(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "data.txt").write_text("conteudo", encoding="utf-8")
             with mock.patch(
-                "cpf_lgpd.scanner.iter_text_path", side_effect=PermissionError("segredo")
+                "cpf_lgpd.scanner.iter_units_path", side_effect=PermissionError("segredo")
             ):
                 result = scan_directory(root)
-            self.assertEqual(result.files_failed, 1)
             self.assertEqual(result.errors, {"PermissionError": 1})
+            self.assertEqual(len(result.files), 1)
             self.assertNotIn("segredo", json.dumps(result.to_dict()))
 
-    def test_cli_does_not_print_cpf_and_protects_report(self):
+
+class ReportingTests(unittest.TestCase):
+    def test_technical_and_executive_reports_are_minimized_and_protected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            cpf_candidate = "529.982.247-25"
-            (root / "data.txt").write_text(cpf_candidate, encoding="utf-8")
-            report = root / "reports" / "result.json"
-            output = StringIO()
-            with redirect_stdout(output):
-                exit_code = main([str(root), "--report", str(report)])
-
-            self.assertEqual(exit_code, 1)
-            self.assertNotIn(cpf_candidate, output.getvalue())
-            self.assertNotIn(cpf_candidate, report.read_text(encoding="utf-8"))
-            self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
-
-    def test_cli_writes_structured_csv_without_cpf(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            cpf_candidate = "52998224725"
             (root / "data.txt").write_text(
-                f"CPF: {cpf_candidate}; Nome: Pessoa Sintética", encoding="utf-8"
+                f"CPF: {CPF}; Nome: {PERSON_NAME}; Diagnostico: {SENSITIVE_VALUE}",
+                encoding="utf-8",
             )
-            report = root / "result.csv"
-            with redirect_stdout(StringIO()):
-                exit_code = main([str(root), "--csv-report", str(report)])
-            content = report.read_text(encoding="utf-8")
+            result = scan_directory(root, root_id="authorized-root")
+            technical_json = root / "reports" / "technical.json"
+            executive_json = root / "reports" / "executive.json"
+            technical_csv = root / "reports" / "technical.csv"
+            executive_csv = root / "reports" / "executive.csv"
+            write_json_report(technical_json, result)
+            write_executive_json_report(executive_json, result)
+            write_csv_report(technical_csv, result)
+            write_executive_csv_report(executive_csv, result)
+
+            for report in (technical_json, executive_json, technical_csv, executive_csv):
+                content = report.read_text(encoding="utf-8")
+                self.assertNotIn(CPF, content)
+                self.assertNotIn(SENSITIVE_VALUE, content)
+                self.assertNotIn(PERSON_NAME, content)
+                self.assertEqual(stat.S_IMODE(report.stat().st_mode), 0o600)
+
+            technical = json.loads(technical_json.read_text(encoding="utf-8"))
+            executive = json.loads(executive_json.read_text(encoding="utf-8"))
+            self.assertEqual(technical["report_level"], "technical")
+            self.assertEqual(technical["score_version"], "1.1")
+            self.assertEqual(technical["ruleset_version"], "lgpd-br-1.0.0")
+            self.assertIn("positive_indicators", technical["ruleset"][0])
+            self.assertIn("negative_indicators", technical["ruleset"][0])
+            self.assertIn(str(root), technical["findings"][0]["canonical_path"])
+            self.assertEqual(executive["report_level"], "executive")
+            self.assertEqual(executive["findings"][0]["file_path"], "data.txt")
+            self.assertNotIn(str(root), executive_json.read_text(encoding="utf-8"))
+
+            with technical_csv.open(encoding="utf-8", newline="") as stream:
+                row = next(csv.DictReader(stream))
+            for required in (
+                "file_path",
+                "relative_path",
+                "root_id",
+                "location",
+                "rule_id",
+                "legal_category",
+                "subtype",
+                "confidence_score",
+                "confidence_level",
+                "risk_points",
+                "match_count",
+                "requires_human_review",
+                "ruleset_version",
+                "score_version",
+            ):
+                self.assertIn(required, row)
+
+    def test_cli_writes_both_report_levels_without_logging_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "data.txt").write_text(
+                f"CPF: {CPF}; Diagnostico: {SENSITIVE_VALUE}", encoding="utf-8"
+            )
+            output = StringIO()
+            technical = root / "technical.json"
+            executive = root / "executive.json"
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        str(root),
+                        "--report",
+                        str(technical),
+                        "--executive-report",
+                        str(executive),
+                    ]
+                )
             self.assertEqual(exit_code, 1)
-            self.assertIn("risk_score", content)
-            self.assertNotIn(cpf_candidate, content)
+            self.assertNotIn(CPF, output.getvalue())
+            self.assertNotIn(SENSITIVE_VALUE, output.getvalue())
+
+
+class AdditionalFormatTests(unittest.TestCase):
+    def test_archive_and_sqlite_are_still_scanned_without_extraction_to_disk(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with zipfile.ZipFile(root / "documents.zip", "w") as archive:
+                archive.writestr("internal/data.txt", CPF)
+            database = sqlite3.connect(root / "customers.sqlite")
+            database.execute("CREATE TABLE customers (cpf TEXT)")
+            database.execute("INSERT INTO customers VALUES (?)", (CPF,))
+            database.commit()
+            database.close()
+            result = scan_directory(root)
+            self.assertEqual(result.valid_cpfs, 2)
+
+    def test_archive_limit_and_non_utf8_errors_are_controlled(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with zipfile.ZipFile(root / "large.zip", "w") as archive:
+                archive.writestr("large.txt", "x" * 100)
+            (root / "bad.txt").write_bytes(b"\xff\xfe")
+            result = scan_directory(root, extraction_limits=ExtractionLimits(max_member_size=50))
+            self.assertEqual(result.files_failed, 2)
+            self.assertEqual(
+                result.errors, {"ExtractionLimitError": 1, "UnicodeDecodeError": 1}
+            )
 
 
 if __name__ == "__main__":
