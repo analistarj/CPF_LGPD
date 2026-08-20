@@ -197,11 +197,16 @@ class PyWin32SecurityBackend:
             protected_dacl = getattr(
                 self.win32security, "PROTECTED_DACL_SECURITY_INFORMATION", 0x80000000
             )
+            information = (
+                self.win32security.OWNER_SECURITY_INFORMATION
+                | self.win32security.DACL_SECURITY_INFORMATION
+                | protected_dacl
+            )
             self.win32security.SetNamedSecurityInfo(
                 str(path),
                 self.win32security.SE_FILE_OBJECT,
-                self.win32security.DACL_SECURITY_INFORMATION | protected_dacl,
-                None,
+                information,
+                current_sid,
                 None,
                 dacl,
                 None,

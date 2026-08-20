@@ -262,7 +262,9 @@ class ReportingTests(unittest.TestCase):
             self.assertEqual(technical["ruleset_version"], "lgpd-br-1.0.0")
             self.assertIn("positive_indicators", technical["ruleset"][0])
             self.assertIn("negative_indicators", technical["ruleset"][0])
-            self.assertIn(str(root), technical["findings"][0]["canonical_path"])
+            self.assertTrue(
+                Path(technical["findings"][0]["canonical_path"]).samefile(root / "data.txt")
+            )
             self.assertEqual(executive["report_level"], "executive")
             self.assertEqual(executive["findings"][0]["file_path"], "data.txt")
             self.assertNotIn("technical_owner", executive["findings"][0])

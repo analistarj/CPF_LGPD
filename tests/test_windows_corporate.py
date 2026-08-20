@@ -18,6 +18,7 @@ from cpf_lgpd.path_security import (
 from cpf_lgpd.permissions import (
     AccessControlEntry,
     LocalPermissionAdapter,
+    PyWin32SecurityBackend,
     ReportProtectionError,
     SecurityDescriptorSnapshot,
     WindowsPermissionAdapter,
@@ -86,6 +87,45 @@ class WindowsPathPolicyTests(unittest.TestCase):
 
 
 class WindowsAclTests(unittest.TestCase):
+    def test_native_protection_sets_operator_as_owner_and_protects_dacl(self):
+        current_sid = "S-1-5-21-1-1001"
+        acl = mock.Mock()
+        security = mock.Mock()
+        security.OWNER_SECURITY_INFORMATION = 0x1
+        security.DACL_SECURITY_INFORMATION = 0x4
+        security.PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+        security.SE_FILE_OBJECT = 1
+        security.TokenUser = 1
+        security.ACL_REVISION_DS = 4
+        security.OpenProcessToken.return_value = "token"
+        security.GetTokenInformation.return_value = (current_sid, {})
+        security.ConvertStringSidToSid.side_effect = lambda sid: sid
+        security.ACL.return_value = acl
+
+        backend = PyWin32SecurityBackend.__new__(PyWin32SecurityBackend)
+        backend.win32security = security
+        backend.win32api = mock.Mock()
+        backend.win32api.GetCurrentProcess.return_value = "process"
+        backend.win32con = mock.Mock(TOKEN_QUERY=0x8)
+        backend.ntsecuritycon = mock.Mock(FILE_ALL_ACCESS=0x1F01FF)
+
+        backend.protect_file(Path("report.json"))
+
+        security.SetNamedSecurityInfo.assert_called_once()
+        arguments = security.SetNamedSecurityInfo.call_args.args
+        self.assertEqual(arguments[3], current_sid)
+        self.assertIsNone(arguments[4])
+        self.assertIs(arguments[5], acl)
+        self.assertIsNone(arguments[6])
+        self.assertTrue(arguments[2] & security.OWNER_SECURITY_INFORMATION)
+        self.assertTrue(arguments[2] & security.DACL_SECURITY_INFORMATION)
+        self.assertTrue(arguments[2] & security.PROTECTED_DACL_SECURITY_INFORMATION)
+        granted_sids = [call.args[3] for call in acl.AddAccessAllowedAceEx.call_args_list]
+        self.assertEqual(
+            granted_sids,
+            [current_sid, "S-1-5-18", "S-1-5-32-544"],
+        )
+
     @unittest.skipUnless(os.name == "nt", "integracao pywin32 executa somente no Windows")
     def test_real_pywin32_backend_reads_and_protects_temporary_file(self):
         with tempfile.TemporaryDirectory() as temporary:
