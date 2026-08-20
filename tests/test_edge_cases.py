@@ -177,8 +177,9 @@ class PermissionAdapterEdgeTests(unittest.TestCase):
             self.assertEqual(failed.source, "posix_stat_failed")
 
     def test_windows_adapter_is_conservative(self):
+        path = Path("C:/sintetico.txt")
         with mock.patch("cpf_lgpd.permissions.os.name", "nt"):
-            result = LocalPermissionAdapter().assess(Path("C:/sintetico.txt"))
+            result = LocalPermissionAdapter().assess(path)
         self.assertTrue(result.unknown)
         self.assertEqual(result.source, "windows_acl_adapter_not_configured")
 
