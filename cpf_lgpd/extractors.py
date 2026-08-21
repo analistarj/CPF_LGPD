@@ -39,6 +39,37 @@ class ExtractionLimits:
     max_database_rows: int = 1_000_000
 
 
+@dataclass
+class _ArchiveBudget:
+    """Orcamento acumulado para toda a arvore de conteudo compactado."""
+
+    members: int = 0
+    total_size: int = 0
+
+    def reserve(self, size: int, limits: ExtractionLimits) -> None:
+        if size < 0 or size > limits.max_member_size:
+            raise ExtractionLimitError("membro compactado excede limite individual")
+        next_members = self.members + 1
+        next_total = self.total_size + size
+        if (
+            next_members > limits.max_archive_members
+            or next_total > limits.max_archive_size
+        ):
+            raise ExtractionLimitError("arquivo compactado excede limites totais")
+        self.members = next_members
+        self.total_size = next_total
+
+
+def _reserve_zip_members(
+    archive: zipfile.ZipFile,
+    limits: ExtractionLimits,
+    budget: _ArchiveBudget,
+) -> None:
+    for info in archive.infolist():
+        if not info.is_dir():
+            budget.reserve(info.file_size, limits)
+
+
 @dataclass(frozen=True)
 class ExtractedField:
     """Campo efemero. O texto nunca integra o resultado serializado."""
@@ -279,12 +310,14 @@ def _column_number(reference: str) -> int:
     return result
 
 
-def _xlsx_units(data: bytes, limits: ExtractionLimits) -> Iterator[ExtractedUnit]:
+def _xlsx_units(
+    data: bytes,
+    limits: ExtractionLimits,
+    budget: _ArchiveBudget,
+) -> Iterator[ExtractedUnit]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            for info in archive.infolist():
-                if info.file_size > limits.max_member_size:
-                    raise ExtractionLimitError("parte Office excede limite")
+            _reserve_zip_members(archive, limits, budget)
             shared: list[str] = []
             if "xl/sharedStrings.xml" in archive.namelist():
                 shared_root = _safe_xml_root(archive.read("xl/sharedStrings.xml"))
@@ -373,12 +406,15 @@ def _xlsx_units(data: bytes, limits: ExtractionLimits) -> Iterator[ExtractedUnit
         raise ExtractionError("arquivo XLSX invalido") from exception
 
 
-def _docx_units(data: bytes, limits: ExtractionLimits) -> Iterator[ExtractedUnit]:
+def _docx_units(
+    data: bytes,
+    limits: ExtractionLimits,
+    budget: _ArchiveBudget,
+) -> Iterator[ExtractedUnit]:
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            _reserve_zip_members(archive, limits, budget)
             info = archive.getinfo("word/document.xml")
-            if info.file_size > limits.max_member_size:
-                raise ExtractionLimitError("parte Office excede limite")
             root = _safe_xml_root(archive.read(info))
     except (KeyError, zipfile.BadZipFile) as exception:
         raise ExtractionError("arquivo DOCX invalido") from exception
@@ -531,21 +567,20 @@ def _archive_units(
     limits: ExtractionLimits,
     ocr_language: str,
     depth: int,
+    budget: _ArchiveBudget,
 ) -> Iterator[ExtractedUnit]:
     if depth > limits.max_archive_depth:
         raise ExtractionLimitError("profundidade maxima de arquivos compactados excedida")
-    total = 0
-    members = 0
 
     def consume(name: str, payload: bytes) -> Iterator[ExtractedUnit]:
-        nonlocal total, members
-        members += 1
-        total += len(payload)
-        if members > limits.max_archive_members or total > limits.max_archive_size:
-            raise ExtractionLimitError("arquivo compactado excede limites totais")
-        if len(payload) > limits.max_member_size:
-            raise ExtractionLimitError("membro compactado excede limite individual")
-        for unit in iter_units_bytes(payload, Path(name).suffix.lower(), limits, ocr_language, depth):
+        for unit in iter_units_bytes(
+            payload,
+            Path(name).suffix.lower(),
+            limits,
+            ocr_language,
+            depth,
+            budget,
+        ):
             location = {"archive_member": name, **unit.location}
             fields = tuple(
                 ExtractedField(
@@ -562,13 +597,13 @@ def _archive_units(
             with zipfile.ZipFile(io.BytesIO(data)) as archive:
                 for info in archive.infolist():
                     if not info.is_dir():
-                        if info.file_size > limits.max_member_size:
-                            raise ExtractionLimitError("membro compactado excede limite individual")
+                        budget.reserve(info.file_size, limits)
                         yield from consume(info.filename, archive.read(info))
         else:
             with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
                 for info in archive:
                     if info.isfile():
+                        budget.reserve(info.size, limits)
                         stream = archive.extractfile(info)
                         if stream:
                             yield from consume(info.name, stream.read())
@@ -582,6 +617,7 @@ def iter_units_bytes(
     limits: ExtractionLimits,
     ocr_language: str,
     depth: int = 0,
+    _archive_budget: _ArchiveBudget | None = None,
 ) -> Iterator[ExtractedUnit]:
     """Extrai unidades estruturais de bytes sem gravar conteudo no disco."""
     if suffix == ".csv":
@@ -595,15 +631,22 @@ def iter_units_bytes(
     elif suffix in PDF_EXTENSIONS:
         yield from _pdf_units(data)
     elif suffix == ".docx":
-        yield from _docx_units(data, limits)
+        yield from _docx_units(data, limits, _archive_budget or _ArchiveBudget())
     elif suffix == ".xlsx":
-        yield from _xlsx_units(data, limits)
+        yield from _xlsx_units(data, limits, _archive_budget or _ArchiveBudget())
     elif suffix == ".xls":
         yield from _legacy_xls_units(data)
     elif suffix in IMAGE_EXTENSIONS:
         yield from _image_units(data, ocr_language)
     elif suffix in ARCHIVE_EXTENSIONS:
-        yield from _archive_units(data, suffix, limits, ocr_language, depth + 1)
+        yield from _archive_units(
+            data,
+            suffix,
+            limits,
+            ocr_language,
+            depth + 1,
+            _archive_budget or _ArchiveBudget(),
+        )
     elif suffix in {".doc", *DATABASE_EXTENSIONS}:
         raise ExtractionError("formato dentro de compactado exige processamento independente")
 

@@ -25,6 +25,18 @@ def analyze(text: str, *, secret: bytes | None = None, mode: str = "cpf-anchor")
 
 
 class RulesetTests(unittest.TestCase):
+    def test_cpf_is_preserved_when_split_between_input_chunks(self):
+        analyzer = ContextAnalyzer(AnalysisConfig())
+        prefix = "registro sem quebra " + "x" * 65_520
+        payload = f"{prefix} CPF: {CPF}; Diagnostico: condicao-sintetica"
+        split = payload.index(CPF) + 5
+        analyzer.feed(payload[:split])
+        analyzer.feed(payload[split:])
+        result = analyzer.finish()
+
+        self.assertEqual(result.cpf_count, 1)
+        self.assertIn("health", result.categories)
+
     def test_taxonomy_and_rule_contract_are_exact_and_versioned(self):
         self.assertEqual(
             set(LEGAL_CATEGORIES),

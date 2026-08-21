@@ -201,6 +201,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Arquivos com falha: {result.files_failed}")
     print(f"Arquivos com achados: {len(result.findings)}")
     print(f"Total de CPFs validos: {result.valid_cpfs}")
+    if result.scan_timed_out:
+        print("Erro operacional: ProcessingTimeLimit", file=sys.stderr)
+        return 2
     if args.report:
         print("Relatorio protegido gravado com sucesso.")
     if args.csv_report:

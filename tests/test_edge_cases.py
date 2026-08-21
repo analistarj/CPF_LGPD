@@ -105,6 +105,46 @@ class CliAndConfigurationEdgeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(path)
 
+            invalid_types = (
+                {"weights": None},
+                {"weights": {"cpf": "5"}},
+                {"governance": "unknown"},
+                {"governance": {"purpose": 7}},
+                {"extensions": "txt"},
+                {"extensions": ["txt", 7]},
+                {"max_file_size_mb": "50"},
+                {"max_processing_seconds": False},
+                {"include_share_acl": "true"},
+            )
+            for payload in invalid_types:
+                with self.subTest(payload=payload):
+                    path.write_text(json.dumps(payload), encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        load_config(path)
+
+            path.write_text('{"weights": null}', encoding="utf-8")
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                exit_code = main([temporary, "--config", str(path)])
+            self.assertEqual(exit_code, 2)
+            self.assertIn("ValueError", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_cli_reports_timeout_as_incomplete_operational_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            timed_out = ScanResult(str(root), "synthetic-root")
+            timed_out.scan_timed_out = True
+            timed_out.errors["ProcessingTimeLimit"] = 1
+            stdout = StringIO()
+            stderr = StringIO()
+            with mock.patch("cpf_lgpd.cli.scan_directory", return_value=timed_out):
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    exit_code = main([str(root)])
+            self.assertEqual(exit_code, 2)
+            self.assertIn("ProcessingTimeLimit", stderr.getvalue())
+            self.assertIn("Arquivos examinados: 0", stdout.getvalue())
+
 
 class ScannerEdgeTests(unittest.TestCase):
     def test_scan_argument_validation_and_invalid_report_level(self):
@@ -244,6 +284,52 @@ class ExtractorEdgeTests(unittest.TestCase):
                 )
             )
 
+    def test_office_archives_enforce_aggregate_member_and_size_limits(self):
+        office_documents = {
+            ".docx": {
+                "word/document.xml": (
+                    b'<w:document xmlns:w="urn:w"><w:body /></w:document>'
+                ),
+                "word/media/ignored.bin": b"x" * 32,
+            },
+            ".xlsx": {
+                "xl/workbook.xml": b"<workbook />",
+                "xl/media/ignored.bin": b"x" * 32,
+            },
+        }
+        for suffix, entries in office_documents.items():
+            with io.BytesIO() as stream:
+                with zipfile.ZipFile(stream, "w") as archive:
+                    for name, payload in entries.items():
+                        archive.writestr(name, payload)
+                office_data = stream.getvalue()
+            with self.subTest(suffix=suffix, limit="members"), self.assertRaises(
+                ExtractionLimitError
+            ):
+                list(
+                    iter_units_bytes(
+                        office_data,
+                        suffix,
+                        ExtractionLimits(max_archive_members=1),
+                        "por",
+                    )
+                )
+            total_size = sum(len(payload) for payload in entries.values())
+            with self.subTest(suffix=suffix, limit="size"), self.assertRaises(
+                ExtractionLimitError
+            ):
+                list(
+                    iter_units_bytes(
+                        office_data,
+                        suffix,
+                        ExtractionLimits(
+                            max_member_size=1024,
+                            max_archive_size=total_size - 1,
+                        ),
+                        "por",
+                    )
+                )
+
         with io.BytesIO() as stream:
             with zipfile.ZipFile(stream, "w") as archive:
                 archive.writestr("xl/workbook.xml", "x" * 50)
@@ -365,6 +451,44 @@ class ExtractorEdgeTests(unittest.TestCase):
             )
         with self.assertRaises(ExtractionError):
             list(iter_units_bytes(b"invalid-archive", ".zip", self.limits, "por"))
+
+    def test_nested_archives_share_member_and_size_budgets(self):
+        def zip_bytes(entries):
+            with io.BytesIO() as stream:
+                with zipfile.ZipFile(stream, "w") as archive:
+                    for name, payload in entries.items():
+                        archive.writestr(name, payload)
+                return stream.getvalue()
+
+        first = zip_bytes({"first.txt": f"CPF: {CPF}".encode()})
+        second = zip_bytes({"second.txt": b"conteudo sintetico"})
+        outer = zip_bytes({"first.zip": first, "second.zip": second})
+        self.assertTrue(list(iter_units_bytes(outer, ".zip", self.limits, "por")))
+        with self.assertRaises(ExtractionLimitError):
+            list(
+                iter_units_bytes(
+                    outer,
+                    ".zip",
+                    ExtractionLimits(max_archive_members=3),
+                    "por",
+                )
+            )
+
+        nested_payload = b"x" * 32
+        inner = zip_bytes({"data.txt": nested_payload})
+        outer = zip_bytes({"inner.zip": inner})
+        with self.assertRaises(ExtractionLimitError):
+            list(
+                iter_units_bytes(
+                    outer,
+                    ".zip",
+                    ExtractionLimits(
+                        max_member_size=len(inner) + 1,
+                        max_archive_size=len(inner) + len(nested_payload) - 1,
+                    ),
+                    "por",
+                )
+            )
 
     def test_database_row_limit_invalid_database_and_embedded_restriction(self):
         with tempfile.TemporaryDirectory() as temporary:
